@@ -16,13 +16,14 @@
 │    → Normalize → SimHash Dedup → D1 (articles)  │
 └─────────────────────────────────────────────────┘
 ┌─ Cron B（1日1回）──────────────────────────────┐
-│  Digest Worker                                  │
+│  Feed Builder Worker                            │
 │    D1 未処理記事 → Workers AI Embedding         │
-│    → 意味的 Dedup → Score → 上位選抜            │
-│    → LLM で要約/digest 生成 → D1 (digests)      │
+│    → 意味的 Dedup → Score（全件をスコア順に保持）│
+│    → 傾向サマリ + LLM 要約 → D1 (feed)          │
 └─────────────────────────────────────────────────┘
 ┌─ 閲覧 ─────────────────────────────────────────┐
-│  Viewer（Cloudflare Access で保護）→ D1         │
+│  Viewer（Cloudflare Access で保護）             │
+│    ランク付きフィード表示・もっと見る → D1      │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -47,24 +48,24 @@ RawItem を仕様 §3 の共通スキーマに変換する。URL 正規化（ト
 ### 2.3 Dedup
 
 - 機械的 Dedup: SimHash を Fetch Worker 内で計算し、既存レコードとの近接ハッシュを保存前に棄却 (BS L23)
-- 意味的 Dedup: Digest Worker 内で Embedding 後に cosine 閾値クラスタリング (BS L25)。件数は 1 日分に絞られているため全ペア比較で足りる【たたき台】
+- 意味的 Dedup: Feed Builder Worker 内で Embedding 後に cosine 閾値クラスタリング (BS L25)。件数は 1 日分に絞られているため全ペア比較で足りる【たたき台】
 
 ### 2.4 Scorer
 
 仕様 §6 のスコア式を実装。関心軸ベクトルは D1 に保存し、`max(cosine)` とヒット軸を記録する (BS L42-47)。
 
-### 2.5 Digest Generator
+### 2.5 Feed Builder
 
-1 日 1 回のみ LLM を呼び (BS L18)、2 部構成の digest を生成する（仕様 §8）:
+1 日 1 回 (BS L106) フィード（仕様 §8）を組む:
 
-1. **当日傾向サマリ**（§8.1）: Scorer が出したヒット軸分布・意味的 Dedup のクラスタ・ソース別件数を集計し、LLM で当日傾向を叙述する。集計は既存のスコアリング成果物を再利用するため追加の Embedding は不要
-2. **厳選記事リスト**（§8.2）: 上位選抜記事の要約
+1. **当日傾向サマリ**（§8.1）: Scorer が出したヒット軸分布・意味的 Dedup のクラスタを軸ごとに集計し、LLM で軸別に叙述する。集計は既存のスコアリング成果物を再利用するため追加の Embedding は不要
+2. **ランク付き記事リスト**（§8.2）: 当日母集団をスコア降順で全件保持。hard cut しない
 
-LLM は Workers AI を使用（確定 2026-07-06）。モデル選定は PoC のコスト実測で判断。PoC 実測（`docs/poc_results.md` ④）で llama-3.2-3b の日本語品質が不十分と判明したため、実運用前に日本語品質の高い生成モデルへ再選定する。
+LLM は Workers AI を使用（確定 2026-07-06）。PoC 実測（`docs/poc_results.md` ④）で llama-3.2-3b の日本語品質が不十分と判明したため、実運用前に日本語品質の高い生成モデルへ再選定する。LLM 要約の生成範囲（上位先行 / 全件 / 開いた時のみ）は未確定（FR-7 の論点）。「開いた時のみ」を採る場合、本文非保存 (NFR-2) のため Viewer から本文再 fetch する経路が要る。
 
 ### 2.6 Viewer
 
-digest を表示する非公開ページ。Cloudflare Access で認証 (BS L78)。配信フォーマット細部は未確定 (BS L115)。
+ランク付きフィードを表示する非公開ページ。Cloudflare Access で認証 (BS L78)。スコア順に並べ「もっと見る」で下位をページング読み込みする。LLM 要約を「開いた時のみ生成」する場合は、記事を開いた時点で本文を再 fetch → 要約する処理を持つ（本文は保存しない）。配信フォーマット細部は未確定 (BS L115)。
 
 ## 3. データ設計【たたき台】
 
@@ -96,12 +97,24 @@ CREATE TABLE interest_axes (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
--- 生成済み digest
-CREATE TABLE digests (
+-- 日次フィード（ランク付き）。当日母集団を全件スコア順に保持する
+CREATE TABLE feed_entries (
+  id          INTEGER PRIMARY KEY,
+  date        TEXT NOT NULL,            -- フィード生成日
+  article_id  INTEGER NOT NULL REFERENCES articles(id),
+  rank        INTEGER NOT NULL,         -- スコア降順の順位（もっと見る式ページングの並び）
+  summary     TEXT,                     -- 自前生成の要約（保存可 BS L75）。生成範囲は FR-7 論点、未生成は NULL
+  UNIQUE(date, article_id)
+);
+
+-- 当日傾向サマリ（軸ごと。自前生成物のみ）
+CREATE TABLE feed_trends (
   id         INTEGER PRIMARY KEY,
-  date       TEXT NOT NULL UNIQUE,
-  body       TEXT NOT NULL,             -- 自前生成物のみ（保存可 — BS L75）
-  created_at TEXT DEFAULT (datetime('now'))
+  date       TEXT NOT NULL,
+  axis       TEXT NOT NULL,             -- 関心軸（ジャンル）
+  hit_count  INTEGER NOT NULL,          -- その軸のヒット件数
+  narrative  TEXT,                      -- LLM による軸別の叙述（保存可 BS L75）
+  UNIQUE(date, axis)
 );
 ```
 
