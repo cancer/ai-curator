@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { loadFixture } from "../fixtures";
 import { parseHnResponse } from "./hn";
 
-const fixture = await Bun.file(
+const { exists, text } = await loadFixture(
   new URL("../../fixtures/hn_search.json", import.meta.url),
-).json();
+);
 
 describe("parseHnResponse", () => {
-  test("hits を正規化記事に変換する", () => {
-    const articles = parseHnResponse(fixture);
+  test.skipIf(!exists)("hits を正規化記事に変換する", () => {
+    const articles = parseHnResponse(JSON.parse(text));
     expect(articles.length).toBeGreaterThan(0);
     const first = articles[0]!;
     expect(first.url).toStartWith("https://");

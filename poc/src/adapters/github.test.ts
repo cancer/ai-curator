@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { loadFixture } from "../fixtures";
 import { parseGithubReleases } from "./github";
 
-const fixture = await Bun.file(
+const { exists, text } = await loadFixture(
   new URL("../../fixtures/github_releases.json", import.meta.url),
-).json();
+);
 
 describe("parseGithubReleases", () => {
-  test("リリースを正規化記事に変換する", () => {
-    const articles = parseGithubReleases(fixture, "sveltejs/svelte");
+  test.skipIf(!exists)("リリースを正規化記事に変換する", () => {
+    const articles = parseGithubReleases(JSON.parse(text), "sveltejs/svelte");
     expect(articles.length).toBeGreaterThan(0);
     const first = articles[0]!;
     expect(first.url).toStartWith("https://github.com/sveltejs/svelte/releases/tag/");

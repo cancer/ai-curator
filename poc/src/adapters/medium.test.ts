@@ -1,16 +1,17 @@
 import { describe, expect, test } from "bun:test";
+import { loadFixture } from "../fixtures";
 import { parseMediumFeed } from "./medium";
 
-const authorFeed = await Bun.file(
+const author = await loadFixture(
   new URL("../../fixtures/medium_author_feed.xml", import.meta.url),
-).text();
-const tagFeed = await Bun.file(
+);
+const tag = await loadFixture(
   new URL("../../fixtures/medium_tag_feed.xml", import.meta.url),
-).text();
+);
 
 describe("parseMediumFeed", () => {
-  test("著者 feed: content:encoded から本文テキストを抽出する", () => {
-    const articles = parseMediumFeed(authorFeed, "medium:@kentbeck_7670");
+  test.skipIf(!author.exists)("著者 feed: content:encoded から本文テキストを抽出する", () => {
+    const articles = parseMediumFeed(author.text, "medium:@kentbeck_7670");
     expect(articles.length).toBeGreaterThan(0);
     const first = articles[0]!;
     expect(first.source).toBe("medium:@kentbeck_7670");
@@ -21,8 +22,8 @@ describe("parseMediumFeed", () => {
     expect(first.body!).not.toContain("<p>");
   });
 
-  test("タグ feed: 本文なし、description から要約テキストを取る", () => {
-    const articles = parseMediumFeed(tagFeed, "medium:tag/software-architecture");
+  test.skipIf(!tag.exists)("タグ feed: 本文なし、description から要約テキストを取る", () => {
+    const articles = parseMediumFeed(tag.text, "medium:tag/software-architecture");
     expect(articles.length).toBeGreaterThan(0);
     const first = articles[0]!;
     expect(first.body).toBeUndefined();
