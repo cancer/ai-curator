@@ -1,0 +1,6 @@
+.env
+.envrc
+.dev.vars
+node_modules/
+poc/out/
+.wrangler/
