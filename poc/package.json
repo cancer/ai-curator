@@ -1,0 +1,22 @@
+{
+  "name": "ai-curator-poc",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p ai-proxy/tsconfig.json",
+    "step1": "bun run scripts/step1_sources.ts",
+    "step2": "bun run scripts/step2_extract.ts",
+    "step3": "bun run scripts/step3_scoring.ts",
+    "step4": "bun run scripts/step4_digest.ts"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^4.5.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240000.0",
+    "@types/bun": "^1.1.0",
+    "typescript": "^5.5.0",
+    "wrangler": "4"
+  }
+}

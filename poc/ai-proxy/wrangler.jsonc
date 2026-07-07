@@ -1,0 +1,8 @@
+// PoC 用のローカルプロキシ Worker。wrangler dev の AI バインディング経由で
+// Workers AI を呼ぶ（1Password 承認が使えないリモート作業期間の代替ルート）。
+{
+  "name": "ai-curator-poc-proxy",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-01",
+  "ai": { "binding": "AI" }
+}
