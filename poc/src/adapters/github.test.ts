@@ -1,19 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { loadFixture } from "../fixtures";
 import { parseGithubReleases } from "./github";
 
-const { exists, text } = await loadFixture(
-  new URL("../../fixtures/github_releases.json", import.meta.url),
-);
+const text = await Bun.file(new URL("../../fixtures/github_releases.json", import.meta.url)).text();
 
 describe("parseGithubReleases", () => {
-  test.skipIf(!exists)("リリースを正規化記事に変換する", () => {
-    const articles = parseGithubReleases(JSON.parse(text), "sveltejs/svelte");
+  test("リリースを正規化記事に変換する", () => {
+    const articles = parseGithubReleases(JSON.parse(text), "acme/widget-kit");
     expect(articles.length).toBeGreaterThan(0);
     const first = articles[0]!;
-    expect(first.url).toStartWith("https://github.com/sveltejs/svelte/releases/tag/");
-    expect(first.title).toContain("svelte@");
-    expect(first.source).toBe("github:sveltejs/svelte");
+    expect(first.url).toStartWith("https://github.com/acme/widget-kit/releases/tag/");
+    expect(first.title).toContain("widget-kit@");
+    expect(first.source).toBe("github:acme/widget-kit");
     expect(Date.parse(first.publishedAt)).not.toBeNaN();
     expect(first.body).toContain("Patch Changes");
   });

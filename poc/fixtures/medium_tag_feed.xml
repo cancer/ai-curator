@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0" xmlns:cc="http://cyber.law.harvard.edu/rss/creativeCommonsRssModule.html">
+    <channel>
+        <title><![CDATA[Example Topic on Medium]]></title>
+        <description><![CDATA[Latest stories tagged with Example Topic on Medium]]></description>
+        <link>https://medium.com/tag/example-topic/latest?source=rss------example_topic-5</link>
+        <image>
+            <url>https://cdn-images-1.medium.com/proxy/example-topic-icon.png</url>
+            <title>Example Topic on Medium</title>
+            <link>https://medium.com/tag/example-topic/latest?source=rss------example_topic-5</link>
+        </image>
+        <generator>Medium</generator>
+        <lastBuildDate>Mon, 06 Jul 2026 07:43:00 GMT</lastBuildDate>
+        <atom:link href="https://medium.com/feed/tag/example-topic" rel="self" type="application/rss+xml"/>
+        <webMaster><![CDATA[yourfriends@medium.com]]></webMaster>
+        <atom:link href="http://medium.superfeedr.com" rel="hub"/>
+        <item>
+            <title><![CDATA[Five Fictional Patterns for Synthetic Systems]]></title>
+            <description><![CDATA[<div class="medium-feed-item"><p class="medium-feed-image"><a href="https://medium.com/example-pub/five-fictional-patterns-for-synthetic-systems-1a2b3c?source=rss------example_topic-5"><img src="https://cdn-images-1.medium.com/max/1002/example-cover.jpg" width="1002"></a></p><p class="medium-feed-snippet">A short fictional teaser sentence about five made-up patterns.</p><p class="medium-feed-link"><a href="https://medium.com/example-pub/five-fictional-patterns-for-synthetic-systems-1a2b3c?source=rss------example_topic-5">Continue reading on Example Publication »</a></p></div>]]></description>
+            <link>https://medium.com/example-pub/five-fictional-patterns-for-synthetic-systems-1a2b3c?source=rss------example_topic-5</link>
+            <guid isPermaLink="false">https://medium.com/p/1a2b3c</guid>
+            <category><![CDATA[example-engineering]]></category>
+            <category><![CDATA[example-topic]]></category>
+            <dc:creator><![CDATA[Example Author One]]></dc:creator>
+            <pubDate>Mon, 06 Jul 2026 07:09:28 GMT</pubDate>
+            <atom:updated>2026-07-06T07:09:28.000Z</atom:updated>
+        </item>
+        <item>
+            <title><![CDATA[Example Widget Consulting Services | Example Corp]]></title>
+            <description><![CDATA[<div class="medium-feed-item"><p class="medium-feed-image"><a href="https://medium.com/@example-user-42/example-widget-consulting-services-example-corp-4d5e6f?source=rss------example_topic-5"><img src="https://cdn-images-1.medium.com/max/1080/example-banner.png" width="1080"></a></p><p class="medium-feed-snippet">A fictional promotional teaser sentence with no real content, used only for tests.</p><p class="medium-feed-link"><a href="https://medium.com/@example-user-42/example-widget-consulting-services-example-corp-4d5e6f?source=rss------example_topic-5">Continue reading on Medium »</a></p></div>]]></description>
+            <link>https://medium.com/@example-user-42/example-widget-consulting-services-example-corp-4d5e6f?source=rss------example_topic-5</link>
+            <guid isPermaLink="false">https://medium.com/p/4d5e6f</guid>
+            <category><![CDATA[example-topic]]></category>
+            <dc:creator><![CDATA[Example User Forty Two]]></dc:creator>
+            <pubDate>Mon, 06 Jul 2026 07:05:51 GMT</pubDate>
+            <atom:updated>2026-07-06T07:05:51.000Z</atom:updated>
+        </item>
+    </channel>
+</rss>

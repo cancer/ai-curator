@@ -1,0 +1,72 @@
+{
+  "exhaustive": { "nbHits": false, "typo": true },
+  "exhaustiveNbHits": false,
+  "exhaustiveTypo": true,
+  "hits": [
+    {
+      "_highlightResult": {
+        "author": { "matchLevel": "none", "matchedWords": [], "value": "exampleuser1" },
+        "title": { "matchLevel": "none", "matchedWords": [], "value": "Show HN: A tiny state machine library in 200 lines" },
+        "url": { "matchLevel": "none", "matchedWords": [], "value": "https://example.com/blog/tiny-state-machine" }
+      },
+      "_tags": ["story", "author_exampleuser1", "story_90000001", "front_page"],
+      "author": "exampleuser1",
+      "children": [90000011, 90000012],
+      "created_at": "2026-07-01T10:00:00Z",
+      "created_at_i": 1783065600,
+      "num_comments": 30,
+      "objectID": "90000001",
+      "points": 120,
+      "story_id": 90000001,
+      "title": "Show HN: A tiny state machine library in 200 lines",
+      "updated_at": "2026-07-01T12:00:00Z",
+      "url": "https://example.com/blog/tiny-state-machine"
+    },
+    {
+      "_highlightResult": {
+        "author": { "matchLevel": "none", "matchedWords": [], "value": "exampleuser2" },
+        "title": { "matchLevel": "none", "matchedWords": [], "value": "Ask HN: How do you structure monorepos in 2026?" }
+      },
+      "_tags": ["story", "author_exampleuser2", "story_90000002", "ask_hn"],
+      "author": "exampleuser2",
+      "children": [90000021],
+      "created_at": "2026-07-02T08:00:00Z",
+      "created_at_i": 1783148800,
+      "num_comments": 42,
+      "objectID": "90000002",
+      "points": 75,
+      "story_id": 90000002,
+      "story_text": "We have a growing example monorepo and are debating whether to split it. Curious how others structure theirs.",
+      "title": "Ask HN: How do you structure monorepos in 2026?",
+      "updated_at": "2026-07-02T09:00:00Z",
+      "url": null
+    },
+    {
+      "_highlightResult": {
+        "author": { "matchLevel": "none", "matchedWords": [], "value": "exampleuser3" },
+        "title": { "matchLevel": "none", "matchedWords": [], "value": "A gentle introduction to synthetic benchmarking" },
+        "url": { "matchLevel": "none", "matchedWords": [], "value": "https://example.org/posts/synthetic-benchmarking" }
+      },
+      "_tags": ["story", "author_exampleuser3", "story_90000003", "front_page"],
+      "author": "exampleuser3",
+      "children": [],
+      "created_at": "2026-07-03T12:00:00Z",
+      "created_at_i": 1783238400,
+      "num_comments": 55,
+      "objectID": "90000003",
+      "points": 200,
+      "story_id": 90000003,
+      "title": "A gentle introduction to synthetic benchmarking",
+      "updated_at": "2026-07-03T14:00:00Z",
+      "url": "https://example.org/posts/synthetic-benchmarking"
+    }
+  ],
+  "hitsPerPage": 3,
+  "nbHits": 3,
+  "nbPages": 1,
+  "page": 0,
+  "params": "tags=story&numericFilters=points%3E50&hitsPerPage=3",
+  "processingTimeMS": 2,
+  "query": "",
+  "serverTimeMS": 2
+}

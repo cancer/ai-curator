@@ -1,18 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { loadFixture } from "../fixtures";
 import { htmlToText } from "../html";
 import { extractFowlerBody, parseFowlerFeed } from "./fowler";
 
-const feed = await loadFixture(
-  new URL("../../fixtures/fowler_feed.atom", import.meta.url),
-);
-const article = await loadFixture(
-  new URL("../../fixtures/fowler_article.html", import.meta.url),
-);
+const feedText = await Bun.file(new URL("../../fixtures/fowler_feed.atom", import.meta.url)).text();
+const articleText = await Bun.file(new URL("../../fixtures/fowler_article.html", import.meta.url)).text();
 
 describe("parseFowlerFeed", () => {
-  test.skipIf(!feed.exists)("Atom entry を正規化記事に変換する", () => {
-    const articles = parseFowlerFeed(feed.text);
+  test("Atom entry を正規化記事に変換する", () => {
+    const articles = parseFowlerFeed(feedText);
     expect(articles.length).toBeGreaterThan(0);
     const first = articles[0]!;
     expect(first.url).toStartWith("https://martinfowler.com/");
@@ -25,21 +20,21 @@ describe("parseFowlerFeed", () => {
 });
 
 describe("extractFowlerBody", () => {
-  test.skipIf(!article.exists)("記事ページの main 要素から本文テキストを抽出する", () => {
-    const body = extractFowlerBody(article.text);
-    expect(body).toContain("PRINCE");
+  test("記事ページの main 要素から本文テキストを抽出する", () => {
+    const body = extractFowlerBody(articleText);
+    expect(body).toContain("Zorp");
     expect(body.length).toBeGreaterThan(2000);
     expect(body).not.toContain("<p");
   });
 
-  test.skipIf(!article.exists)("ボイラープレート（タイトル h1・著者・目次）を除去する", () => {
-    const body = extractFowlerBody(article.text);
+  test("ボイラープレート（タイトル h1・著者・目次）を除去する", () => {
+    const body = extractFowlerBody(articleText);
     // h1 のタイトルは本文から除く（NormalizedArticle.title に別途保持されるため）
-    expect(body).not.toContain("Building Reliable Agentic AI Systems");
+    expect(body).not.toContain("Notes on the Zorp Reliability Platform");
     // 著者略歴は本文ではない
-    expect(body).not.toContain("Sarang Kulkarni is a Principal Consultant");
+    expect(body).not.toContain("Example Author is a fictional persona created only for testing purposes");
     // 除去により、main 全体を素朴に抽出した場合より短くなる
-    const naive = htmlToText(article.text, { root: "main" });
+    const naive = htmlToText(articleText, { root: "main" });
     expect(body.length).toBeLessThan(naive.length);
   });
 

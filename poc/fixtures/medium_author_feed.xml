@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0" xmlns:cc="http://cyber.law.harvard.edu/rss/creativeCommonsRssModule.html">
+    <channel>
+        <title><![CDATA[Stories by Jamie Rivera on Medium]]></title>
+        <description><![CDATA[Stories by Jamie Rivera on Medium]]></description>
+        <link>https://medium.com/@jamie-rivera-example?source=rss-example0000------2</link>
+        <image>
+            <url>https://cdn-images-1.medium.com/fit/c/150/150/example-avatar.jpeg</url>
+            <title>Stories by Jamie Rivera on Medium</title>
+            <link>https://medium.com/@jamie-rivera-example?source=rss-example0000------2</link>
+        </image>
+        <generator>Medium</generator>
+        <lastBuildDate>Mon, 06 Jul 2026 07:40:50 GMT</lastBuildDate>
+        <atom:link href="https://medium.com/@jamie-rivera-example/feed" rel="self" type="application/rss+xml"/>
+        <webMaster><![CDATA[yourfriends@medium.com]]></webMaster>
+        <atom:link href="http://medium.superfeedr.com" rel="hub"/>
+        <item>
+            <title><![CDATA[Example-Driven Refactoring Tames Complexity By Reducing Choices]]></title>
+            <link>https://medium.com/@jamie-rivera-example/example-driven-refactoring-tames-complexity-abc123?source=rss-example0000------2</link>
+            <guid isPermaLink="false">https://medium.com/p/abc123</guid>
+            <dc:creator><![CDATA[Jamie Rivera]]></dc:creator>
+            <pubDate>Mon, 01 Jun 2026 21:09:37 GMT</pubDate>
+            <atom:updated>2026-06-01T21:09:37.000Z</atom:updated>
+            <content:encoded><![CDATA[<p>When I joined the example project three years ago I inherited a small internal tool called Zorp. It had grown from a weekend script into something the whole team depended on, and nobody was quite sure anymore which parts were load-bearing.</p><p>The first week I spent just reading. I renamed a few variables, split one enormous function into three smaller ones, and ran the existing example test suite after every change. Nothing broke, so I kept going.</p><h4>A Structural Habit</h4><p>What I settled into was a habit: before changing behavior, change only the shape of the code. Extract a function. Rename a value. Inline a wrapper that no longer wrapped anything useful. Each step was small enough that if the example test suite failed, I knew exactly which change to undo.</p><p>Over a few months, Zorp's structure slowly became legible. Modules that used to reach across the whole codebase now depended on a handful of narrow interfaces. None of this was visible from the outside; the tool behaved exactly the same on day ninety as it had on day one.</p><h4>Why It Mattered</h4><p>The payoff came later, when a genuinely new feature was requested. Because Zorp's internals were now organized around clear seams, the feature fit into a single module instead of touching a dozen files. What would have been a risky, multi-week change became a contained, one-day addition.</p><p>I don't think this habit is exotic. It's closer to gardening than engineering: small, frequent, reversible adjustments that keep a system tidy enough that bigger changes stay possible. The example of Zorp is fictional, but the habit is one I'd recommend to anyone maintaining a system that has quietly become load-bearing.</p><img src="https://medium.com/_/stat?event=post.clientViewed&referrerSource=full_rss&postId=abc123" width="1" height="1" alt="">]]></content:encoded>
+        </item>
+        <item>
+            <title><![CDATA[Tune Your Example Workflow For Rate Of Change]]></title>
+            <link>https://medium.com/@jamie-rivera-example/tune-your-example-workflow-def456?source=rss-example0000------2</link>
+            <guid isPermaLink="false">https://medium.com/p/def456</guid>
+            <category><![CDATA[example-engineering]]></category>
+            <dc:creator><![CDATA[Jamie Rivera]]></dc:creator>
+            <pubDate>Thu, 16 Apr 2026 16:06:59 GMT</pubDate>
+            <atom:updated>2026-04-16T16:06:59.000Z</atom:updated>
+            <content:encoded><![CDATA[<p>This is a second fictional example post used only to verify that the feed parser can handle multiple items in a single author feed. It contains no real content and describes no real event.</p><p>The fictional Zorp platform mentioned in this feed is a placeholder used purely for testing the extraction of article bodies from syndicated feeds.</p>]]></content:encoded>
+        </item>
+    </channel>
+</rss>

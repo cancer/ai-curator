@@ -1,0 +1,120 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html>
+<head><meta charset="UTF-8">
+<title>Notes on the Zorp Reliability Platform</title>
+<meta http-equiv="Content-type" content="text/html;charset=UTF-8" />
+<meta content = 'Notes on the Zorp Reliability Platform' property = 'og:title'></meta>
+<meta content = 'https://martinfowler.com/articles/example-zorp-notes.html' property = 'og:url'></meta>
+<meta content = 'A fictional case study used only for fixture testing' property = 'og:description'></meta>
+<meta content = 'martinfowler.com' property = 'og:site_name'></meta>
+<meta content = 'article' property = 'og:type'></meta>
+<meta content = 'width=device-width, initial-scale=1' name = 'viewport'></meta>
+</head>
+
+<body><header id = 'banner'>
+<div class = 'name-logo'><a href = 'https://martinfowler.com'>Example Site</a></div>
+</header>
+
+<nav class = 'top-menu'>
+<ul>
+<li><a href = '/example'>Example</a></li>
+</ul>
+</nav>
+
+<main>
+<h1>Notes on the Zorp Reliability Platform</h1>
+
+<p class = 'subtitle'>A fictional case study created only to test article extraction</p>
+
+<section class = 'frontMatter'>
+<p class = 'abstract'><i>
+    This is a synthetic abstract for a fictional platform called Zorp. Zorp does not exist and this
+    text describes no real company, product, or person. It exists only to give the fixture a
+    realistic front-matter shape, including an abstract, a publication date, an author biography,
+    and a table of contents, so that boilerplate-removal logic can be exercised the same way it
+    would be against a real article page.
+  </i></p>
+
+<p class = 'date'>01 July 2026</p>
+<hr></hr>
+<div class = 'front-grid'>
+<div class = 'author-list'>
+<div class = 'author'>
+<div class = 'photo'></div>
+
+<address class = 'name'>Example Author</address>
+
+<div class = 'bio'>
+<p>Example Author is a fictional persona created only for testing purposes. This biography
+        paragraph exists solely to verify that author biographies are correctly excluded from
+        extracted article text, and it describes no real person, employer, or event.</p>
+</div>
+</div>
+</div>
+
+<div class = 'tags'></div>
+
+<div class = 'contents'>
+<h2>Contents</h2>
+
+<ul>
+<li><a href = '#Introduction'>Introduction</a></li>
+
+<li><a href = '#HowZorpStarted'>How Zorp Started</a></li>
+
+<li><a href = '#DesigningForRecovery'>Designing for Recovery</a></li>
+
+<li><a href = '#Conclusion'>Conclusion</a></li>
+</ul>
+</div>
+</div>
+</section>
+
+<h2 id = 'Introduction'>Introduction</h2>
+
+<p>Zorp is a fictional internal platform invented purely to give this fixture realistic article
+structure. In this made-up scenario, a small team maintained Zorp as a way of routing example
+requests between a handful of example services, and over time it grew from a weekend prototype
+into something the fictional team depended on every day.</p>
+
+<p>None of the events described here happened. There is no real Zorp, no real team, and no real
+incident. The goal of this text is only to provide enough words, headings, and paragraph breaks
+that a boilerplate-removal routine has real prose to operate on, separate from the surrounding
+title, date, author biography, and table of contents.</p>
+
+<h2 id = 'HowZorpStarted'>How Zorp Started</h2>
+
+<p>In this fictional account, Zorp began as a single script that copied example records from one
+place to another. As more fictional teams started depending on it, the script grew handlers for
+retries, for partial failures, and eventually for something resembling a plugin system. Nobody
+had designed Zorp; it had simply accumulated, the way small fictional tools tend to.</p>
+
+<p>Eventually the fictional maintainers noticed that Zorp's failure modes were becoming difficult
+to reason about. A single slow example dependency could cascade into a much larger outage. This
+imagined pressure motivated a rewrite focused specifically on reliability rather than on adding
+more features.</p>
+
+<h2 id = 'DesigningForRecovery'>Designing for Recovery</h2>
+
+<p>The fictional rewrite of Zorp introduced three ideas. First, every operation became retryable
+by construction, so a failed step could be re-attempted without side effects. Second, Zorp began
+recording enough context about each operation that a human could reconstruct what had happened
+without reading through raw logs. Third, and most importantly for this fictional narrative, Zorp
+was changed to fail fast and loudly rather than silently continuing in a degraded state.</p>
+
+<p>These three ideas, invented purely for this fixture, are meant to mirror the kind of language
+that appears in real engineering write-ups: a problem, a handful of design decisions, and a
+reflection on why those decisions mattered. Because everything here is synthetic, none of it
+should be mistaken for advice about an actual system.</p>
+
+<h2 id = 'Conclusion'>Conclusion</h2>
+
+<p>This fixture exists only to exercise HTML parsing and boilerplate removal in a test suite. The
+fictional Zorp platform, its fictional maintainers, and the fictional incidents mentioned above
+were all invented for that purpose and do not describe any real system, organization, or person.</p>
+
+</main>
+
+</body>
+</html>

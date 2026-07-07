@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <link href="https://martinfowler.com/feed.atom" rel="self"/>
+  <link href="https://martinfowler.com"/>
+  <id>https://martinfowler.com/feed.atom</id>
+  <title>Example Feed</title>
+  <subtitle>Synthetic fixture standing in for the martinfowler.com feed</subtitle>
+  <author>
+    <name>Example Author</name>
+    <email>example@example.com</email>
+    <uri>https://martinfowler.com</uri>
+  </author>
+  <updated>2026-07-01T13:11:00+01:00</updated>
+<entry>
+    <title>Notes on the Zorp Reliability Platform</title>
+    <link href="https://martinfowler.com/articles/example-zorp-notes.html"/>
+    <updated>2026-07-01T13:11:00+01:00</updated>
+    <id>tag:martinfowler.com,2026-07-01:Notes-on-the-Zorp-Reliability-Platform</id>
+    <author>
+      <name>Example Author</name>
+      <email>example@example.com</email>
+      <uri>https://martinfowler.com</uri>
+    </author>
+    <content type="html">
+&lt;div class = 'img-link'&gt;&lt;a href = 'https://martinfowler.com/articles/example-zorp-notes.html'&gt;&lt;img src = 'https://martinfowler.com/articles/example-zorp-notes/card.png' width = '350px'&gt;&lt;/img&gt;&lt;/a&gt;&lt;/div&gt;
+
+&lt;p&gt;This is a fictional example article summary used only to test feed parsing. It describes
+      a made-up platform, &lt;b class = 'example'&gt;Zorp&lt;/b&gt;, and contains no real content
+      about any real person, product, or event.&lt;/p&gt;
+
+&lt;p&gt;&lt;a class = 'more' href = 'https://martinfowler.com/articles/example-zorp-notes.html'&gt;more…&lt;/a&gt;&lt;/p&gt;</content>
+  </entry>
+
+<entry>
+    <title>Fragments: Example Notes</title>
+    <link href="https://martinfowler.com/fragments/example-2026-07-01.html"/>
+    <updated>2026-07-01T08:44:00-04:00</updated>
+    <id>tag:martinfowler.com,2026-07-01:Fragments-Example-Notes</id>
+    <author>
+      <name>Example Author</name>
+      <email>example@example.com</email>
+      <uri>https://martinfowler.com</uri>
+    </author>
+    <content type="html">
+&lt;p&gt;A short fictional round-up paragraph with a couple of placeholder links, used only to
+      exercise the feed parser with a second, shorter entry.&lt;/p&gt;</content>
+  </entry>
+
+</feed>
