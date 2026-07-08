@@ -68,6 +68,12 @@ export interface FeedBuilderDeps {
 /** embedding 呼び出しの間隔（レート制御）。 */
 const EMBED_SPACING_MS = 150;
 
+/**
+ * fowler 記事ページの連続 fetch に空ける最小間隔（計画タスク 5(d)
+ * 「連続アクセスは 1 秒以上間隔を空ける」）。fowler 以外のソースには不要。
+ */
+const FOWLER_ARTICLE_SPACING_MS = 1000;
+
 /** 過去 24 時間の記事（フィード作業集合）。body 列は存在しないため取得しない。 */
 const WORKING_SET_SQL =
   "SELECT id, title, source, url, published_at, feed_summary, embedding, embedding_model " +
@@ -134,6 +140,28 @@ async function resolveBody(
 
   // hn / medium:tag は本文が無い。feedSummary へフォールバックさせる。
   return null;
+}
+
+/**
+ * 本文リゾルバを作る。fowler の記事ページを連続 fetch する際は、直前の
+ * fowler fetch から FOWLER_ARTICLE_SPACING_MS 以上間隔を空ける（相手サーバへの
+ * 配慮）。fowler 以外のソースには間隔を入れない。sleep はテストで実時間を
+ * 待たないよう注入する。
+ */
+export function makeBodyResolver(
+  fetchers: BodyFetchers,
+  sleep: (ms: number) => Promise<void>,
+): (target: SummaryTarget) => Promise<string | null> {
+  let fowlerFetched = false;
+  return async (target) => {
+    if (target.source === "fowler") {
+      if (fowlerFetched) {
+        await sleep(FOWLER_ARTICLE_SPACING_MS);
+      }
+      fowlerFetched = true;
+    }
+    return resolveBody(target, fetchers);
+  };
 }
 
 export async function runFeedBuilder(
@@ -298,7 +326,8 @@ export async function runFeedBuilder(
     env.AI,
     config.digest,
     topTargets,
-    (target) => resolveBody(target, fetchers),
+    makeBodyResolver(fetchers, sleep),
+    sleep,
   );
   for (const [articleId, summary] of summaries) {
     await db
@@ -328,6 +357,7 @@ export async function runFeedBuilder(
           config.digest.maxOutputTokens,
           axis.label,
           axisHits.slice(0, 10).map((s) => s.article.title),
+          sleep,
         );
       } catch (err) {
         trendFailed += 1;

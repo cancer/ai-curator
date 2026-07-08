@@ -40,6 +40,23 @@ describe("parseFeed", () => {
     const [first] = await parseFeed(fowlerFeedXml);
     expect(first.body).toBeUndefined();
   });
+
+  it("truncates feedSummary to 300 chars (never stores near-full body text)", async () => {
+    const longContent = "<content>" + "あ".repeat(1000) + "</content>";
+    const xml =
+      '<?xml version="1.0" encoding="utf-8"?>' +
+      '<feed xmlns="http://www.w3.org/2005/Atom">' +
+      "<entry>" +
+      "<title>Long entry</title>" +
+      '<link href="https://martinfowler.com/articles/long.html"/>' +
+      "<updated>2025-07-07T10:00:00Z</updated>" +
+      longContent +
+      "</entry>" +
+      "</feed>";
+
+    const [article] = await parseFeed(xml);
+    expect(article.feedSummary!.length).toBeLessThanOrEqual(300);
+  });
 });
 
 describe("selectHref", () => {

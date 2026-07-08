@@ -1,9 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
-import { runFeedBuilder, type FeedBuilderDeps } from "./feed";
+import {
+  runFeedBuilder,
+  makeBodyResolver,
+  type FeedBuilderDeps,
+  type BodyFetchers,
+} from "./feed";
 import type { Config } from "../config";
 import type { Env } from "../index";
 import type { NormalizedArticle } from "../adapters/types";
 import type { EmbeddingResult } from "../lib/embedding";
+import type { SummaryTarget } from "../lib/summarize";
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -119,6 +125,52 @@ function embedReturning(vectors: number[][]): FeedBuilderDeps["embed"] {
 
 const noSleep = async () => {};
 const now = () => new Date("2026-07-08T21:00:00.000Z");
+
+describe("makeBodyResolver — fowler article fetch spacing", () => {
+  function target(source: string, url: string): SummaryTarget {
+    return { articleId: 1, title: "t", source, url, feedSummary: null };
+  }
+
+  function fetchers(fetchArticleBody: BodyFetchers["fetchArticleBody"]): BodyFetchers {
+    return {
+      fetchReleases: async () => [
+        { url: "g1", title: "t", source: "github:o/r", publishedAt: "x", body: "gh" },
+      ] as NormalizedArticle[],
+      fetchAuthorFeed: async () => [],
+      fetchArticleBody,
+    };
+  }
+
+  it("does not sleep before the first fowler fetch but waits >=1000ms before each subsequent one", async () => {
+    const sleepCalls: number[] = [];
+    const sleep = async (ms: number) => {
+      sleepCalls.push(ms);
+    };
+    const fetchArticleBody = vi.fn(async () => "body");
+    const resolve = makeBodyResolver(fetchers(fetchArticleBody), sleep);
+
+    await resolve(target("fowler", "https://martinfowler.com/a"));
+    await resolve(target("fowler", "https://martinfowler.com/b"));
+    await resolve(target("fowler", "https://martinfowler.com/c"));
+
+    // One spacing sleep before the 2nd and 3rd fowler fetch (not before the 1st).
+    expect(sleepCalls).toEqual([1000, 1000]);
+    expect(fetchArticleBody).toHaveBeenCalledTimes(3);
+  });
+
+  it("never sleeps for non-fowler sources", async () => {
+    const sleepCalls: number[] = [];
+    const sleep = async (ms: number) => {
+      sleepCalls.push(ms);
+    };
+    const resolve = makeBodyResolver(fetchers(vi.fn(async () => "body")), sleep);
+
+    await resolve(target("github:o/r", "g1"));
+    await resolve(target("github:o/r", "g1"));
+
+    expect(sleepCalls).toEqual([]);
+  });
+});
 
 describe("runFeedBuilder — end-to-end orchestration", () => {
   it("embeds null-embedding articles, dedups, scores, writes ranked feed_entries and trends", async () => {

@@ -56,6 +56,32 @@ describe("summarizeArticle", () => {
     expect(user).toContain("あ".repeat(6000));
     expect(user).not.toContain("あ".repeat(6001));
   });
+
+  it("retries the AI call on a transient error and then succeeds", async () => {
+    let attempts = 0;
+    const ai = {
+      run: (async () => {
+        attempts += 1;
+        if (attempts < 2) {
+          throw new Error("transient AI error");
+        }
+        return { response: "リトライ後の要約" };
+      }) as unknown as Ai["run"],
+    } as Ai;
+    const noSleep = async () => {};
+
+    const result = await summarizeArticle(
+      ai,
+      "@cf/model",
+      300,
+      "t",
+      "本文",
+      noSleep,
+    );
+
+    expect(result).toBe("リトライ後の要約");
+    expect(attempts).toBe(2);
+  });
 });
 
 describe("summarizeTrend", () => {
@@ -151,6 +177,7 @@ describe("summarizeTopEntries", () => {
       return { response: "ok" };
     });
     const resolveBody = async (t: SummaryTarget) => t.title;
+    const noSleep = async () => {};
 
     const { summaries, failed } = await summarizeTopEntries(
       ai,
@@ -160,6 +187,7 @@ describe("summarizeTopEntries", () => {
         target({ articleId: 2, title: "通る記事" }),
       ],
       resolveBody,
+      noSleep,
     );
 
     expect(failed).toBe(1);

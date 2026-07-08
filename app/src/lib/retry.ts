@@ -20,6 +20,7 @@ const DEFAULT_FETCH = globalThis.fetch;
 const DEFAULT_SLEEP = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const BACKOFF_MS = [1000, 2000, 4000]; // 1s, 2s, 4s
+const MAX_ATTEMPTS = 4; // initial + 3 retries
 
 export async function fetchWithRetry(
   url: RequestInfo | URL,
@@ -29,48 +30,34 @@ export async function fetchWithRetry(
   const fetchFn = options?.fetch ?? DEFAULT_FETCH;
   const sleepFn = options?.sleep ?? DEFAULT_SLEEP;
 
-  let lastException: Error | null = null;
-  let lastResponse: Response | null = null;
-
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const isLastAttempt = attempt === MAX_ATTEMPTS - 1;
     try {
       const response = await fetchFn(url, init);
 
-      // 4xx responses return immediately
+      // 4xx responses return immediately (no retry).
       if (response.status >= 400 && response.status < 500) {
         return response;
       }
 
-      // 5xx responses: store and potentially retry
-      if (response.status >= 500) {
-        lastResponse = response;
-        if (attempt < 3) {
-          await sleepFn(BACKOFF_MS[attempt]);
-          continue;
-        }
-        return response;
+      // 5xx responses: retry unless this is the last attempt.
+      if (response.status >= 500 && !isLastAttempt) {
+        await sleepFn(BACKOFF_MS[attempt]);
+        continue;
       }
 
-      // Success (2xx, 3xx)
+      // Success (2xx, 3xx), or a 5xx on the final attempt.
       return response;
     } catch (e) {
-      lastException = e instanceof Error ? e : new Error(String(e));
-
-      // If this was the last attempt, throw
-      if (attempt === 3) {
-        throw lastException;
+      // Network exception: throw on the last attempt, otherwise back off and retry.
+      if (isLastAttempt) {
+        throw e instanceof Error ? e : new Error(String(e));
       }
-
-      // Otherwise sleep and retry
       await sleepFn(BACKOFF_MS[attempt]);
     }
   }
 
-  // Should not reach here, but if we do and have a response, return it
-  if (lastResponse) {
-    return lastResponse;
-  }
-
-  // Otherwise throw the last exception
-  throw lastException ?? new Error("Unknown error in fetchWithRetry");
+  // The loop always returns or throws on the final attempt; this satisfies the
+  // return-type checker.
+  throw new Error("fetchWithRetry: exhausted retries without a result");
 }

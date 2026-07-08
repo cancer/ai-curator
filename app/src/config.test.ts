@@ -165,6 +165,96 @@ describe("config", () => {
       );
     });
 
+    it("should throw when interestAxes element has empty label", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        interestAxes: [{ id: "web-fw", label: "", seedText: "text" }],
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "InterestAxis.label must be a non-empty string"
+      );
+    });
+
+    it("should throw when sources.hnMinPoints is negative", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        sources: { ...validConfig.sources, hnMinPoints: -1 },
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "sources.hnMinPoints must be a non-negative integer"
+      );
+    });
+
+    it("should throw when sources.hnMinPoints is not an integer", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        sources: { ...validConfig.sources, hnMinPoints: 1.5 },
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "sources.hnMinPoints must be a non-negative integer"
+      );
+    });
+
+    it("should throw when a scoring.weights value is negative", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        scoring: {
+          ...validConfig.scoring,
+          weights: { interest: 0.6, freshness: -0.1, sourceTrust: 0.1 },
+        },
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "scoring.weights.freshness must be a non-negative number"
+      );
+    });
+
+    it("should throw when scoring.semanticDedupThreshold is out of [0,1]", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        scoring: { ...validConfig.scoring, semanticDedupThreshold: 1.5 },
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "scoring.semanticDedupThreshold must be a number in [0, 1]"
+      );
+    });
+
+    it("should throw when a scoring.sourceTrust value is negative", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        scoring: {
+          ...validConfig.scoring,
+          sourceTrust: { github: 1.0, fowler: 1.0, medium: 0.7, hn: -0.5 },
+        },
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "scoring.sourceTrust.hn must be a non-negative number"
+      );
+    });
+
     it("should throw when scoring.freshnessHalfLifeDays is not positive", async () => {
       const env = createMockEnv();
       const config = {

@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { EmbeddingResult } from "./embedding";
 import {
   embed,
-  embedBatch,
   axisNeedsUpdate,
   sha256Hex,
 } from "./embedding";
@@ -159,58 +158,6 @@ describe("embed", () => {
     await embed(ai, "@cf/baai/bge-m3", longText);
 
     expect(capturedText![0]).toHaveLength(20000);
-  });
-});
-
-describe("embedBatch", () => {
-  it("should process multiple texts with 150ms delay between calls", async () => {
-    const callTimings: number[] = [];
-    const startTime = Date.now();
-
-    const ai = createMockAi(async () => {
-      callTimings.push(Date.now() - startTime);
-      return { data: [[0.1]], shape: [1, 1] };
-    });
-
-    const mockSleep = vi.fn((ms: number) => Promise.resolve());
-
-    const texts = ["text1", "text2", "text3"];
-    const results = await embedBatch(ai, "@cf/baai/bge-m3", texts, 20000, mockSleep);
-
-    expect(results).toHaveLength(3);
-    expect(results.every((r) => Array.isArray(r.vector))).toBe(true);
-
-    // Should have 2 sleep calls (between 3 texts)
-    expect(mockSleep).toHaveBeenCalledTimes(2);
-    expect(mockSleep).toHaveBeenNthCalledWith(1, 150);
-    expect(mockSleep).toHaveBeenNthCalledWith(2, 150);
-  });
-
-  it("should not sleep before first call", async () => {
-    const ai = createMockAi(async () => ({
-      data: [[0.1]],
-      shape: [1, 1],
-    }));
-
-    const mockSleep = vi.fn(() => Promise.resolve());
-
-    await embedBatch(ai, "@cf/baai/bge-m3", ["only one"], 20000, mockSleep);
-
-    expect(mockSleep).not.toHaveBeenCalled();
-  });
-
-  it("should handle empty input array", async () => {
-    const ai = createMockAi(async () => ({
-      data: [[0.1]],
-      shape: [1, 1],
-    }));
-
-    const mockSleep = vi.fn(() => Promise.resolve());
-
-    const results = await embedBatch(ai, "@cf/baai/bge-m3", [], 20000, mockSleep);
-
-    expect(results).toHaveLength(0);
-    expect(mockSleep).not.toHaveBeenCalled();
   });
 });
 

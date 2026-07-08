@@ -3,9 +3,11 @@
  *
  * feed: https://martinfowler.com/feed.atom（Atom）
  *   entry の link@href / title / updated（→publishedAt ISO）/
- *   content（HTML → htmlToText → feedSummary）。url は link@href を正規化。
- * 記事本文: 記事 URL を fetch（user-agent 付与、連続アクセスは 1 秒以上間隔）し、
- *   <main> の内側からナビ・見出し等を除いて抽出する。
+ *   content（HTML → htmlToText → 先頭 FEED_SUMMARY_CHARS 字 → feedSummary）。
+ *   Atom content はほぼ本文全文のため、切り詰めずに保存すると法務原則
+ *   「本文全文の原文を保存しない」に抵触する。url は link@href を正規化。
+ * 記事本文: 記事 URL を fetch（user-agent 付与）し、<main> の内側から
+ *   ナビ・見出し等を除いて抽出する。連続アクセスの間隔制御は呼び出し側が担う。
  *   <main> が見つからない（抽出結果が空）ページは throw（サイト構造変更の検知）。
  */
 
@@ -34,7 +36,9 @@ interface AtomEntry {
 
 const SOURCE = "fowler";
 const USER_AGENT = "ai-curator";
-const ARTICLE_SPACING_MS = 1000;
+
+/** feedSummary に保存する content の最大文字数（本文全文の原文保存を避ける）。 */
+const FEED_SUMMARY_CHARS = 300;
 
 /** 記事本文抽出。<main> 内から本文以外の定型要素を除外する。 */
 const ARTICLE_ROOT = "main";
@@ -74,7 +78,10 @@ export async function parseFeed(xml: string): Promise<NormalizedArticle[]> {
       title: String(entry.title),
       source: SOURCE,
       publishedAt: new Date(String(entry.updated)).toISOString(),
-      feedSummary: await htmlToText(contentText(entry.content)),
+      feedSummary: (await htmlToText(contentText(entry.content))).slice(
+        0,
+        FEED_SUMMARY_CHARS,
+      ),
     })),
   );
 }
@@ -127,38 +134,4 @@ export async function fetchFowlerFeed(
     return [];
   }
   return parseFeed(await res.text());
-}
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * feed を取得して各記事本文を埋める。記事ページへの連続アクセスは
- * 1 秒以上間隔を空ける。
- */
-export async function fetchFowler(
-  options?: FetchWithRetryOptions,
-): Promise<NormalizedArticle[]> {
-  const res = await fetchWithRetry(
-    "https://martinfowler.com/feed.atom",
-    { headers: { "user-agent": USER_AGENT } },
-    options,
-  );
-  if (!res.ok) {
-    console.warn(`fowler: feed returned ${res.status}; skipping`);
-    return [];
-  }
-
-  const articles = await parseFeed(await res.text());
-
-  const withBody: NormalizedArticle[] = [];
-  for (const [index, article] of articles.entries()) {
-    if (index > 0) {
-      await sleep(ARTICLE_SPACING_MS);
-    }
-    withBody.push({
-      ...article,
-      body: await fetchArticleBody(article.url, options),
-    });
-  }
-  return withBody;
 }

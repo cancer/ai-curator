@@ -109,34 +109,6 @@ export async function embed(
 }
 
 /**
- * Embed multiple texts sequentially with 150ms delay between calls.
- * Useful for processing multiple articles without overwhelming the API.
- *
- * sleep parameter allows tests to inject instant returns instead of waiting.
- */
-export async function embedBatch(
-  ai: Ai,
-  model: string,
-  texts: string[],
-  maxInputChars: number = 20000,
-  sleep?: (ms: number) => Promise<void>
-): Promise<EmbeddingResult[]> {
-  const results: EmbeddingResult[] = [];
-  const delayMs = 150;
-
-  for (let i = 0; i < texts.length; i++) {
-    if (i > 0) {
-      // 150ms delay between consecutive calls (except before first)
-      await (sleep ? sleep(delayMs) : new Promise((r) => setTimeout(r, delayMs)));
-    }
-    const result = await embed(ai, model, texts[i], maxInputChars, sleep);
-    results.push(result);
-  }
-
-  return results;
-}
-
-/**
  * Determine if an interest axis needs to be updated.
  * Pure function for testing.
  *

@@ -19,6 +19,12 @@ interface TextGenerationResponse {
 /** プロンプトに載せる本文抜粋の最大文字数。 */
 const BODY_EXCERPT_CHARS = 6000;
 
+/** 初期試行の後の最大リトライ回数（計 4 試行、バックオフ 1s → 2s → 4s）。 */
+const MAX_RETRIES = 3;
+
+const defaultSleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 const ARTICLE_SYSTEM =
   "あなたは技術ニュースの編集者です。与えられた記事のタイトルと本文抜粋から、" +
   "内容を 2〜3 文の日本語で要約してください。誇張や主観的評価を避け、" +
@@ -29,21 +35,41 @@ const TREND_SYSTEM =
   "その日の技術的な傾向を 1〜2 文の日本語で簡潔に叙述してください。" +
   "誇張や主観的評価を避けてください。";
 
+/**
+ * ai.run をリトライ付きで呼ぶ。AI バインディングは一時エラーで例外を投げる
+ * ことがある（PoC 実測）ため、例外時に指数バックオフ（1s → 2s → 4s）で
+ * 最大 MAX_RETRIES 回まで再試行する。embedding.ts の aiCallWithRetry と同方針。
+ * sleep はテストで実時間を待たないよう注入可能にする。
+ */
 async function runTextGeneration(
   ai: Ai,
   model: string,
   maxTokens: number,
   system: string,
   user: string,
+  sleep: (ms: number) => Promise<void> = defaultSleep,
 ): Promise<string> {
-  const response = (await ai.run(model, {
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-    max_tokens: maxTokens,
-  })) as unknown as TextGenerationResponse;
-  return response.response.trim();
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = (await ai.run(model, {
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        max_tokens: maxTokens,
+      })) as unknown as TextGenerationResponse;
+      return response.response.trim();
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < MAX_RETRIES) {
+        await sleep(Math.pow(2, attempt) * 1000);
+      }
+    }
+  }
+
+  throw lastError ?? new Error("text generation failed");
 }
 
 /** 1 記事の要約。本文抜粋は先頭 BODY_EXCERPT_CHARS 字に切り詰める。 */
@@ -53,10 +79,11 @@ export function summarizeArticle(
   maxTokens: number,
   title: string,
   body: string,
+  sleep?: (ms: number) => Promise<void>,
 ): Promise<string> {
   const excerpt = body.slice(0, BODY_EXCERPT_CHARS);
   const user = `タイトル: ${title}\n\n本文抜粋:\n${excerpt}`;
-  return runTextGeneration(ai, model, maxTokens, ARTICLE_SYSTEM, user);
+  return runTextGeneration(ai, model, maxTokens, ARTICLE_SYSTEM, user, sleep);
 }
 
 /** 1 軸の傾向叙述。その軸のタイトル上位群を入力にする。 */
@@ -66,9 +93,10 @@ export function summarizeTrend(
   maxTokens: number,
   axisLabel: string,
   titles: string[],
+  sleep?: (ms: number) => Promise<void>,
 ): Promise<string> {
   const user = `テーマ: ${axisLabel}\n\n本日の記事タイトル:\n${titles.join("\n")}`;
-  return runTextGeneration(ai, model, maxTokens, TREND_SYSTEM, user);
+  return runTextGeneration(ai, model, maxTokens, TREND_SYSTEM, user, sleep);
 }
 
 /** 要約対象。本文は source/url から再取得する（resolveBody に委譲）。 */
@@ -97,6 +125,7 @@ export async function summarizeTopEntries(
   digest: DigestConfig,
   targets: SummaryTarget[],
   resolveBody: (target: SummaryTarget) => Promise<string | null>,
+  sleep?: (ms: number) => Promise<void>,
 ): Promise<TopEntriesResult> {
   const summaries = new Map<number, string>();
   let failed = 0;
@@ -120,6 +149,7 @@ export async function summarizeTopEntries(
         digest.maxOutputTokens,
         target.title,
         text,
+        sleep,
       );
       summaries.set(target.articleId, summary);
     } catch (err) {

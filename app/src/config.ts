@@ -77,8 +77,8 @@ function validateInterestAxis(axis: unknown): InterestAxis {
     throw new Error("InterestAxis.id must be a non-empty string");
   }
 
-  if (typeof obj.label !== "string") {
-    throw new Error("InterestAxis.label must be a string");
+  if (typeof obj.label !== "string" || obj.label.trim() === "") {
+    throw new Error("InterestAxis.label must be a non-empty string");
   }
 
   if (typeof obj.seedText !== "string" || obj.seedText.trim() === "") {
@@ -116,6 +116,10 @@ function validateSources(sources: unknown): Sources {
 
   if (typeof obj.hnMinPoints !== "number") {
     throw new Error("sources.hnMinPoints must be a number");
+  }
+
+  if (!Number.isInteger(obj.hnMinPoints) || obj.hnMinPoints < 0) {
+    throw new Error("sources.hnMinPoints must be a non-negative integer");
   }
 
   if (!Array.isArray(obj.mediumAuthorFeeds)) {
@@ -164,13 +168,22 @@ function validateScoringWeights(weights: unknown): ScoringWeights {
   if (typeof obj.interest !== "number") {
     throw new Error("scoring.weights.interest must be a number");
   }
+  if (obj.interest < 0) {
+    throw new Error("scoring.weights.interest must be a non-negative number");
+  }
 
   if (typeof obj.freshness !== "number") {
     throw new Error("scoring.weights.freshness must be a number");
   }
+  if (obj.freshness < 0) {
+    throw new Error("scoring.weights.freshness must be a non-negative number");
+  }
 
   if (typeof obj.sourceTrust !== "number") {
     throw new Error("scoring.weights.sourceTrust must be a number");
+  }
+  if (obj.sourceTrust < 0) {
+    throw new Error("scoring.weights.sourceTrust must be a non-negative number");
   }
 
   return {
@@ -193,17 +206,29 @@ function validateSourceTrustScores(trust: unknown): SourceTrustScores {
   if (typeof obj.github !== "number") {
     throw new Error("scoring.sourceTrust.github must be a number");
   }
+  if (obj.github < 0) {
+    throw new Error("scoring.sourceTrust.github must be a non-negative number");
+  }
 
   if (typeof obj.fowler !== "number") {
     throw new Error("scoring.sourceTrust.fowler must be a number");
+  }
+  if (obj.fowler < 0) {
+    throw new Error("scoring.sourceTrust.fowler must be a non-negative number");
   }
 
   if (typeof obj.medium !== "number") {
     throw new Error("scoring.sourceTrust.medium must be a number");
   }
+  if (obj.medium < 0) {
+    throw new Error("scoring.sourceTrust.medium must be a non-negative number");
+  }
 
   if (typeof obj.hn !== "number") {
     throw new Error("scoring.sourceTrust.hn must be a number");
+  }
+  if (obj.hn < 0) {
+    throw new Error("scoring.sourceTrust.hn must be a non-negative number");
   }
 
   return {
@@ -230,6 +255,9 @@ function validateScoringConfig(scoring: unknown): ScoringConfig {
 
   if (typeof obj.semanticDedupThreshold !== "number") {
     throw new Error("scoring.semanticDedupThreshold must be a number");
+  }
+  if (obj.semanticDedupThreshold < 0 || obj.semanticDedupThreshold > 1) {
+    throw new Error("scoring.semanticDedupThreshold must be a number in [0, 1]");
   }
 
   return {

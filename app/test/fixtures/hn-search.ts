@@ -4,7 +4,8 @@ import type { HnSearchResponse } from "../../src/adapters/hn";
  * Hacker News (Algolia) search_by_date レスポンスを模した合成データ（すべて架空）。
  *
  * - url あり（外部リンク記事）
- * - url=null の self-post（item?id フォールバック検証、story_text あり）
+ * - url=null の self-post（item?id フォールバック検証、story_text あり。
+ *   Algolia の story_text は HTML なので <p> 等のタグ付きで表現する）
  * - url あり・story_text なし
  */
 export const hnSearchRaw: HnSearchResponse = {
@@ -22,7 +23,8 @@ export const hnSearchRaw: HnSearchResponse = {
       url: null,
       points: 130,
       created_at: "2025-07-07T09:30:00.000Z",
-      story_text: "I maintain a made-up widget library and wonder about testing.",
+      story_text:
+        "<p>I maintain a made-up widget library and wonder about testing.</p>",
     },
     {
       objectID: "48000003",

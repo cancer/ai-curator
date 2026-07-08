@@ -9,6 +9,7 @@
  */
 
 import { normalizeUrl } from "../lib/normalize";
+import { htmlToText } from "../lib/html";
 import { fetchWithRetry, type FetchWithRetryOptions } from "../lib/retry";
 import type { NormalizedArticle } from "./types";
 
@@ -28,16 +29,23 @@ export interface HnSearchResponse {
 
 const SOURCE = "hn";
 
-export function parseStories(response: HnSearchResponse): NormalizedArticle[] {
-  return response.hits.map((hit) => ({
-    url: normalizeUrl(
-      hit.url ?? `https://news.ycombinator.com/item?id=${hit.objectID}`,
-    ),
-    title: hit.title,
-    source: SOURCE,
-    publishedAt: hit.created_at,
-    feedSummary: hit.story_text ?? undefined,
-  }));
+export function parseStories(
+  response: HnSearchResponse,
+): Promise<NormalizedArticle[]> {
+  // story_text は生 HTML のことがある。SimHash/Embedding 入力を Medium と
+  // 揃えるため plain text 化する（生 HTML が混ざる非対称を解消）。
+  return Promise.all(
+    response.hits.map(async (hit) => ({
+      url: normalizeUrl(
+        hit.url ?? `https://news.ycombinator.com/item?id=${hit.objectID}`,
+      ),
+      title: hit.title,
+      source: SOURCE,
+      publishedAt: hit.created_at,
+      feedSummary:
+        hit.story_text == null ? undefined : await htmlToText(hit.story_text),
+    })),
+  );
 }
 
 export async function fetchStories(
