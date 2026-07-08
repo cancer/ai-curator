@@ -7,6 +7,17 @@ describe("normalizeUrl", () => {
     expect(() => normalizeUrl("://invalid")).toThrow();
   });
 
+  it("throws on non-http(s) schemes (javascript:, data:)", () => {
+    expect(() => normalizeUrl("javascript:alert(1)")).toThrow();
+    expect(() => normalizeUrl("data:text/html,<script>alert(1)</script>")).toThrow();
+    expect(() => normalizeUrl("ftp://example.com/file")).toThrow();
+  });
+
+  it("accepts http and https URLs", () => {
+    expect(normalizeUrl("http://example.com/a")).toBe("http://example.com/a");
+    expect(normalizeUrl("https://example.com/a")).toBe("https://example.com/a");
+  });
+
   it("removes utm_* parameters", () => {
     const url = "https://example.com/article?id=123&utm_source=twitter&utm_medium=social&utm_campaign=week1";
     const normalized = normalizeUrl(url);

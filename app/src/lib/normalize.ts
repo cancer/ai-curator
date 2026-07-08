@@ -8,7 +8,11 @@
  *
  * Preserves other query parameters (e.g., HN's item?id=).
  *
- * @throws {Error} If URL is invalid
+ * Only http:/https: URLs are accepted. This value is later emitted into the
+ * Viewer's `<a href>` and the `/r/{id}` 302 Location, so dangerous schemes
+ * (javascript:, data: etc.) are rejected here to close a stored-XSS path.
+ *
+ * @throws {Error} If URL is invalid or its scheme is not http/https
  * @returns Normalized URL string
  */
 export function normalizeUrl(raw: string): string {
@@ -18,6 +22,10 @@ export function normalizeUrl(raw: string): string {
     url = new URL(raw);
   } catch (e) {
     throw new Error(`Invalid URL: ${raw}`);
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`Unsupported URL scheme: ${url.protocol} (${raw})`);
   }
 
   // Tracking parameters to remove

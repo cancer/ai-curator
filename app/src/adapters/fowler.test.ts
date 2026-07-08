@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { parseFeed, extractArticleBody, fetchFowlerFeed } from "./fowler";
+import { parseFeed, extractArticleBody, fetchFowlerFeed, selectHref } from "./fowler";
 import { fowlerFeedXml } from "../../test/fixtures/fowler-feed";
 import {
   fowlerArticleHtml,
@@ -39,6 +39,24 @@ describe("parseFeed", () => {
   it("does not set body in the feed parse step", async () => {
     const [first] = await parseFeed(fowlerFeedXml);
     expect(first.body).toBeUndefined();
+  });
+});
+
+describe("selectHref", () => {
+  it("throws an explicit error when the link list is empty", () => {
+    expect(() => selectHref([])).toThrow("fowler: entry has no link");
+  });
+
+  it("prefers rel=alternate, falling back to the first link", () => {
+    expect(
+      selectHref([
+        { "@_href": "https://example.com/self", "@_rel": "self" },
+        { "@_href": "https://example.com/alt", "@_rel": "alternate" },
+      ]),
+    ).toBe("https://example.com/alt");
+    expect(selectHref({ "@_href": "https://example.com/only" })).toBe(
+      "https://example.com/only",
+    );
   });
 });
 

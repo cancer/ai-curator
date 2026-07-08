@@ -7,6 +7,9 @@
 
 import type { Env } from "./index";
 
+/** GitHub リポジトリ指定の形式（owner/repo、スラッシュ・空白を含まない 2 要素）。 */
+const REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
+
 export interface InterestAxis {
   id: string;
   label: string;
@@ -103,6 +106,14 @@ function validateSources(sources: unknown): Sources {
     throw new Error("sources.githubRepos must be an array");
   }
 
+  for (const repo of obj.githubRepos) {
+    if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) {
+      throw new Error(
+        `sources.githubRepos entries must be "owner/repo" strings: ${JSON.stringify(repo)}`
+      );
+    }
+  }
+
   if (typeof obj.hnMinPoints !== "number") {
     throw new Error("sources.hnMinPoints must be a number");
   }
@@ -111,8 +122,20 @@ function validateSources(sources: unknown): Sources {
     throw new Error("sources.mediumAuthorFeeds must be an array");
   }
 
+  for (const feed of obj.mediumAuthorFeeds) {
+    if (typeof feed !== "string") {
+      throw new Error("sources.mediumAuthorFeeds entries must be strings");
+    }
+  }
+
   if (!Array.isArray(obj.mediumTagFeeds)) {
     throw new Error("sources.mediumTagFeeds must be an array");
+  }
+
+  for (const feed of obj.mediumTagFeeds) {
+    if (typeof feed !== "string") {
+      throw new Error("sources.mediumTagFeeds entries must be strings");
+    }
   }
 
   if (typeof obj.fowlerFeed !== "boolean") {
@@ -201,8 +224,8 @@ function validateScoringConfig(scoring: unknown): ScoringConfig {
 
   const obj = scoring as Record<string, unknown>;
 
-  if (typeof obj.freshnessHalfLifeDays !== "number") {
-    throw new Error("scoring.freshnessHalfLifeDays must be a number");
+  if (typeof obj.freshnessHalfLifeDays !== "number" || obj.freshnessHalfLifeDays <= 0) {
+    throw new Error("scoring.freshnessHalfLifeDays must be a positive number");
   }
 
   if (typeof obj.semanticDedupThreshold !== "number") {
@@ -284,9 +307,22 @@ function validateConfig(data: unknown): Config {
     throw new Error("interestAxes must be an array");
   }
 
+  if (obj.interestAxes.length === 0) {
+    throw new Error("interestAxes must not be empty (at least one axis)");
+  }
+
   const interestAxes = obj.interestAxes.map((axis) =>
     validateInterestAxis(axis)
   );
+
+  // 重複 id は feed_trends の UNIQUE(date, axis_id) で実行時クラッシュを招くため拒否する。
+  const seenAxisIds = new Set<string>();
+  for (const axis of interestAxes) {
+    if (seenAxisIds.has(axis.id)) {
+      throw new Error(`Duplicate interestAxis id: "${axis.id}"`);
+    }
+    seenAxisIds.add(axis.id);
+  }
 
   return {
     interestAxes,

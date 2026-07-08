@@ -122,14 +122,18 @@ describe("embed", () => {
       throw new Error("Permanent error");
     });
 
-    const mockSleep = vi.fn(() => Promise.resolve());
+    const sleepCalls: number[] = [];
+    const mockSleep = vi.fn((ms: number) =>
+      Promise.resolve((sleepCalls.push(ms), undefined))
+    );
 
     await expect(
       embed(ai, "@cf/baai/bge-m3", "test", 20000, mockSleep)
     ).rejects.toThrow("Permanent error");
 
-    // Should have retried 2 times (total 3 attempts)
-    expect(mockSleep).toHaveBeenCalledTimes(2);
+    // 3 retries after the initial attempt (4 attempts total) -> backoff 1s, 2s, 4s.
+    expect(mockSleep).toHaveBeenCalledTimes(3);
+    expect(sleepCalls).toEqual([1000, 2000, 4000]);
   });
 
   it("should throw if response has no data", async () => {

@@ -75,6 +75,21 @@ describe("htmlToText", () => {
     expect(text).toContain("@sign");
   });
 
+  it("does not throw on out-of-range or invalid numeric references", async () => {
+    // &#99999999; > 0x10FFFF and &#xFFFFFFFF; likewise are out of Unicode range;
+    // String.fromCodePoint would throw RangeError, so they become U+FFFD.
+    const text = await htmlToText(
+      "<p>bad &#99999999; and &#xFFFFFFFF; but ok &#65;</p>",
+    );
+    expect(text).toContain("but ok A");
+    expect(text).toContain("�");
+  });
+
+  it("replaces surrogate-range numeric references with U+FFFD", async () => {
+    const text = await htmlToText("<p>x&#xD800;y</p>");
+    expect(text).toBe("x�y");
+  });
+
   it("normalizes whitespace and trims", async () => {
     const text = await htmlToText("<p>   Multiple   spaces   here   </p>");
     expect(text).toBe("Multiple spaces here");

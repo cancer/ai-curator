@@ -349,4 +349,55 @@ describe("runFeedBuilder — end-to-end orchestration", () => {
     expect(inserts).toHaveLength(1);
     expect(inserts[0].args[1]).toBe(2);
   });
+
+  it("keeps building trends when one axis's narrative fails (null narrative, no total reject)", async () => {
+    const articles = [
+      articleRow({ id: 1, title: "t1", source: "github:o/r", url: "u1", feed_summary: "s1" }),
+    ];
+    // Two axes so both get hit_count rows; article aligns with ai axis only.
+    const axes: AxisRow[] = [
+      { axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" },
+      { axis_id: "web", embedding: "[0,1,0]", embedding_model: "m" },
+    ];
+    const db = makeFakeDb(articles, axes);
+
+    // Text generation (summarizeArticle / summarizeTrend) both go through AI.run.
+    // Fail only the trend call for the "ai" axis; article summaries must still work.
+    const aiRun = vi.fn(async (_model: string, input: { messages: { content: string }[] }) => {
+      const userContent = input.messages[1].content;
+      if (userContent.includes("テーマ: AI")) {
+        throw new Error("trend narrative permanently failed");
+      }
+      return { response: "生成テキスト" };
+    });
+    const env = { AI: { run: aiRun } } as unknown as Env;
+
+    // Must not throw even though the "ai" axis narrative failed.
+    await runFeedBuilder(env, {
+      db: db as unknown as D1Database,
+      loadConfig: async () => makeConfig(),
+      syncInterestAxes: vi.fn(async () => {}),
+      embed: embedReturning([[1, 0, 0]]),
+      sleep: noSleep,
+      bodyFetchers: {
+        fetchReleases: async () =>
+          [{ url: "u1", title: "t1", source: "github:o/r", publishedAt: "x", body: "b" }] as NormalizedArticle[],
+        fetchAuthorFeed: async () => [],
+        fetchArticleBody: async () => "x",
+      },
+      now,
+    });
+
+    // Both axes still get a feed_trends row (delete-first, then per-axis insert).
+    const trendOps = db.ops.filter(
+      (o) => o.kind === "delete-trends" || o.kind === "insert-trend",
+    );
+    expect(trendOps[0].kind).toBe("delete-trends");
+    const trendInserts = db.ops.filter((o) => o.kind === "insert-trend");
+    expect(trendInserts).toHaveLength(2);
+    // ai axis: hit_count 1 but narrative null (generation failed); insert args: [date, axis_id, hit_count, narrative]
+    const ai = trendInserts.find((o) => o.args[1] === "ai")!;
+    expect(ai.args[2]).toBe(1);
+    expect(ai.args[3]).toBeNull();
+  });
 });

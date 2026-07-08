@@ -137,6 +137,90 @@ describe("config", () => {
       );
     });
 
+    it("should throw when interestAxes is empty", async () => {
+      const env = createMockEnv();
+      const config = { ...validConfig, interestAxes: [] };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "interestAxes must not be empty"
+      );
+    });
+
+    it("should throw when interestAxes has duplicate ids", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        interestAxes: [
+          { id: "dup", label: "A", seedText: "a" },
+          { id: "dup", label: "B", seedText: "b" },
+        ],
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        'Duplicate interestAxis id: "dup"'
+      );
+    });
+
+    it("should throw when scoring.freshnessHalfLifeDays is not positive", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        scoring: { ...validConfig.scoring, freshnessHalfLifeDays: 0 },
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "scoring.freshnessHalfLifeDays must be a positive number"
+      );
+    });
+
+    it("should throw when githubRepos has a non owner/repo entry", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        sources: { ...validConfig.sources, githubRepos: ["owner/repo", "not-a-repo"] },
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        'sources.githubRepos entries must be "owner/repo" strings'
+      );
+    });
+
+    it("should throw when mediumAuthorFeeds has a non-string entry", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        sources: { ...validConfig.sources, mediumAuthorFeeds: ["@ok", 123] },
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "sources.mediumAuthorFeeds entries must be strings"
+      );
+    });
+
+    it("should throw when mediumTagFeeds has a non-string entry", async () => {
+      const env = createMockEnv();
+      const config = {
+        ...validConfig,
+        sources: { ...validConfig.sources, mediumTagFeeds: [true] },
+      };
+
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "sources.mediumTagFeeds entries must be strings"
+      );
+    });
+
     it("should throw when sources is missing", async () => {
       const env = createMockEnv();
       const config = { ...validConfig };

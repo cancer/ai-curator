@@ -42,15 +42,18 @@ describe("fetchWithRetry", () => {
       }),
     ).rejects.toThrow("Network error");
 
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    expect(mockSleep).toHaveBeenCalledTimes(2);
+    // 4 attempts (initial + 3 retries), 3 backoff sleeps.
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+    expect(mockSleep).toHaveBeenCalledTimes(3);
     expect(mockSleep).toHaveBeenNthCalledWith(1, 1000);
     expect(mockSleep).toHaveBeenNthCalledWith(2, 2000);
+    expect(mockSleep).toHaveBeenNthCalledWith(3, 4000);
   });
 
   it("retries on 5xx and returns last response", async () => {
     const mockFetch = vi
       .fn()
+      .mockResolvedValueOnce(new Response("Service Unavailable", { status: 503 }))
       .mockResolvedValueOnce(new Response("Service Unavailable", { status: 503 }))
       .mockResolvedValueOnce(new Response("Service Unavailable", { status: 503 }))
       .mockResolvedValueOnce(new Response("Service Unavailable", { status: 503 }));
@@ -63,10 +66,11 @@ describe("fetchWithRetry", () => {
     });
 
     expect(response.status).toBe(503);
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    expect(mockSleep).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+    expect(mockSleep).toHaveBeenCalledTimes(3);
     expect(mockSleep).toHaveBeenNthCalledWith(1, 1000);
     expect(mockSleep).toHaveBeenNthCalledWith(2, 2000);
+    expect(mockSleep).toHaveBeenNthCalledWith(3, 4000);
   });
 
   it("retries 5xx then succeeds on third attempt", async () => {
@@ -101,12 +105,14 @@ describe("fetchWithRetry", () => {
 
     expect(mockSleep).toHaveBeenNthCalledWith(1, 1000);
     expect(mockSleep).toHaveBeenNthCalledWith(2, 2000);
+    expect(mockSleep).toHaveBeenNthCalledWith(3, 4000);
   });
 
   it("mixes network exception with 5xx response", async () => {
     const mockFetch = vi
       .fn()
       .mockRejectedValueOnce(new Error("Network error"))
+      .mockResolvedValueOnce(new Response("Service Unavailable", { status: 503 }))
       .mockResolvedValueOnce(new Response("Service Unavailable", { status: 503 }))
       .mockResolvedValueOnce(new Response("Service Unavailable", { status: 503 }));
 
@@ -118,7 +124,7 @@ describe("fetchWithRetry", () => {
     });
 
     expect(response.status).toBe(503);
-    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
   });
 
   it("passes init and url to fetch correctly", async () => {

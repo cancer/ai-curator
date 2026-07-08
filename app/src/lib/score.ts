@@ -30,8 +30,11 @@ export interface ScoreComponents {
   sourceTrust: number;
 }
 
-/** コサイン類似度。どちらかがゼロベクトルなら 0。 */
+/** コサイン類似度。次元不一致・どちらかがゼロベクトルなら 0。 */
 export function cosine(a: number[], b: number[]): number {
+  if (a.length !== b.length) {
+    return 0;
+  }
   let dot = 0;
   let magA = 0;
   let magB = 0;
@@ -54,7 +57,11 @@ export function freshness(
   now: Date,
   halfLifeDays: number,
 ): number {
-  const elapsedDays = (now.getTime() - new Date(publishedAt).getTime()) / DAY_MS;
+  // 未来日時の publishedAt で freshness > 1 になるのを防ぐため 0 でクランプする。
+  const elapsedDays = Math.max(
+    0,
+    (now.getTime() - new Date(publishedAt).getTime()) / DAY_MS,
+  );
   return Math.pow(0.5, elapsedDays / halfLifeDays);
 }
 

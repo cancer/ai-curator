@@ -149,4 +149,13 @@ describe("handleSettingsUpdate", () => {
     expect(res.status).toBe(400);
     expect(puts.length).toBe(0);
   });
+
+  it("rejects an empty hnMinPoints with 400 (Number('') === 0 must not slip through)", async () => {
+    const { env, puts } = makeEnv();
+    const fields = validFields();
+    fields.hnMinPoints = "   ";
+    const res = await handleSettingsUpdate(env, postForm(fields));
+    expect(res.status).toBe(400);
+    expect(puts.length).toBe(0);
+  });
 });

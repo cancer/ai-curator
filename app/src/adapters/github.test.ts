@@ -24,6 +24,24 @@ describe("parseReleases", () => {
     expect(articles[1].title).toBe("v2.9.1");
   });
 
+  it("falls back to tag_name when name is an empty string", () => {
+    const articles = parseReleases(
+      [
+        {
+          name: "",
+          tag_name: "v1.2.3",
+          body: null,
+          draft: false,
+          prerelease: false,
+          published_at: "2025-01-01T00:00:00Z",
+          html_url: "https://github.com/acme/sprocket/releases/tag/v1.2.3",
+        },
+      ],
+      SOURCE,
+    );
+    expect(articles[0].title).toBe("v1.2.3");
+  });
+
   it("maps body, publishedAt, and source", () => {
     const [first] = parseReleases(githubReleasesRaw, SOURCE);
     expect(first.body).toBe(

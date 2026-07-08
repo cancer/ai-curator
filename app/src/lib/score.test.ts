@@ -29,6 +29,11 @@ describe("cosine", () => {
   it("returns 0 when the second vector is the zero vector", () => {
     expect(cosine([1, 2, 3], [0, 0, 0])).toBe(0);
   });
+
+  it("returns 0 when vector dimensions do not match", () => {
+    expect(cosine([1, 2, 3], [1, 2])).toBe(0);
+    expect(cosine([1, 2], [1, 2, 3])).toBe(0);
+  });
 });
 
 describe("freshness", () => {
@@ -46,6 +51,12 @@ describe("freshness", () => {
   it("returns 0.25 after two half-lives", () => {
     const now = new Date("2026-07-15T00:00:00.000Z");
     expect(freshness("2026-07-01T00:00:00.000Z", now, 7)).toBeCloseTo(0.25, 10);
+  });
+
+  it("clamps future publishedAt so freshness never exceeds 1", () => {
+    const now = new Date("2026-07-08T00:00:00.000Z");
+    // published 5 days in the future -> elapsed clamped to 0 -> freshness 1.
+    expect(freshness("2026-07-13T00:00:00.000Z", now, 7)).toBeCloseTo(1, 10);
   });
 });
 

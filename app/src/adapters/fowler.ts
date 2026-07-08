@@ -48,8 +48,11 @@ const ARTICLE_EXCLUDE = [
 ];
 
 /** entry の複数 link から本文リンク（rel=alternate、無ければ先頭）の href を選ぶ。 */
-function selectHref(link: AtomLink | AtomLink[]): string {
+export function selectHref(link: AtomLink | AtomLink[]): string {
   const links = ensureArray<AtomLink>(link);
+  if (links.length === 0) {
+    throw new Error("fowler: entry has no link");
+  }
   const alternate = links.find((l) => l["@_rel"] === "alternate");
   return (alternate ?? links[0])["@_href"];
 }

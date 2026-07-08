@@ -111,8 +111,10 @@ function validate(model: FormModel): string[] {
     }
   }
 
-  const hn = Number(model.hnMinPoints);
-  if (!Number.isInteger(hn) || hn < 0) {
+  // Number("") は 0 になり素通りするため、trim 後に空・非数値を明示的に弾く。
+  const hnRaw = model.hnMinPoints.trim();
+  const hn = Number(hnRaw);
+  if (hnRaw === "" || !Number.isInteger(hn) || hn < 0) {
     errors.push("hnMinPoints は 0 以上の整数にしてください");
   }
 

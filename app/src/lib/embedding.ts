@@ -40,7 +40,8 @@ function truncateInput(text: string, maxInputChars: number): string {
  * Separate from Task 4's fetchWithRetry because env.AI.run() throws errors
  * instead of returning HTTP responses — different error semantics.
  *
- * Backoff: 1s → 2s → 4s, max 3 attempts.
+ * maxRetries is the number of retries after the initial attempt; with the
+ * default 3 that is 4 attempts total, with backoff 1s → 2s → 4s between them.
  */
 async function aiCallWithRetry(
   ai: Ai,
@@ -52,15 +53,15 @@ async function aiCallWithRetry(
 ): Promise<EmbeddingResponse> {
   let lastError: Error | null = null;
 
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const response = await ai.run(model, { text: [input] });
       return response as unknown as EmbeddingResponse;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
 
-      // Don't retry on the last attempt
-      if (attempt < maxRetries - 1) {
+      // Sleep before each retry; skip after the final attempt.
+      if (attempt < maxRetries) {
         const backoffMs = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
         await sleep(backoffMs);
       }

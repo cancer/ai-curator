@@ -33,7 +33,8 @@ export function parseReleases(
     .filter((release) => !release.draft && !release.prerelease)
     .map((release) => ({
       url: normalizeUrl(release.html_url),
-      title: release.name ?? release.tag_name,
+      // name が空文字 "" のときも tag_name にフォールバックさせる（?? では素通りする）。
+      title: release.name || release.tag_name,
       source,
       publishedAt: release.published_at,
       body: release.body ?? undefined,

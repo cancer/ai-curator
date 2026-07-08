@@ -310,20 +310,33 @@ export async function runFeedBuilder(
   }
 
   // 8. 傾向サマリ。軸ごとに hit_count を集計し、上位タイトルから叙述を生成する。
+  // narrative 生成は軸ごとに try/catch で囲む。直前に当日分を delete 済みのため、
+  // 1 軸の AI 失敗で runFeedBuilder 全体が reject すると当日の feed_trends が
+  // 復旧不能になる。失敗軸は narrative=null で hit_count 行だけ insert して継続する
+  // （step6 の per-item try/catch と同じレジリエンス方針）。
   await db.prepare("DELETE FROM feed_trends WHERE date = ?").bind(date).run();
+  let trendFailed = 0;
   for (const axis of config.interestAxes) {
     const axisHits = ranked.filter((s) => s.hitAxis === axis.id);
     const hitCount = axisHits.length;
-    const narrative =
-      hitCount === 0
-        ? null
-        : await summarizeTrend(
-            env.AI,
-            config.digest.model,
-            config.digest.maxOutputTokens,
-            axis.label,
-            axisHits.slice(0, 10).map((s) => s.article.title),
-          );
+    let narrative: string | null = null;
+    if (hitCount > 0) {
+      try {
+        narrative = await summarizeTrend(
+          env.AI,
+          config.digest.model,
+          config.digest.maxOutputTokens,
+          axis.label,
+          axisHits.slice(0, 10).map((s) => s.article.title),
+        );
+      } catch (err) {
+        trendFailed += 1;
+        console.warn(
+          `feed: trend narrative failed for axis ${axis.id}; ` +
+            `inserting hit_count only: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     await db
       .prepare(
         "INSERT INTO feed_trends (date, axis_id, hit_count, narrative) VALUES (?, ?, ?, ?)",
@@ -341,6 +354,7 @@ export async function runFeedBuilder(
       excludedFromFeed: rows.length - embedded.length,
       feedEntries: ranked.length,
       summarized: summaries.size,
+      trendFailed,
     })}`,
   );
 }

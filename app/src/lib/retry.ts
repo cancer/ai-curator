@@ -2,8 +2,8 @@
  * Fetch with retry logic for network errors and HTTP 5xx responses.
  *
  * Behavior:
- * - Retries on network exceptions and HTTP 5xx (max 3 attempts)
- * - Exponential backoff: 1s → 2s → 4s
+ * - Retries on network exceptions and HTTP 5xx (up to 3 retries = 4 attempts)
+ * - Exponential backoff between attempts: 1s → 2s → 4s
  * - 4xx responses return immediately without retry
  * - On retry exhaustion: throws last exception (network errors),
  *   or returns last Response (5xx errors)
@@ -32,7 +32,7 @@ export async function fetchWithRetry(
   let lastException: Error | null = null;
   let lastResponse: Response | null = null;
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       const response = await fetchFn(url, init);
 
@@ -44,7 +44,7 @@ export async function fetchWithRetry(
       // 5xx responses: store and potentially retry
       if (response.status >= 500) {
         lastResponse = response;
-        if (attempt < 2) {
+        if (attempt < 3) {
           await sleepFn(BACKOFF_MS[attempt]);
           continue;
         }
@@ -57,7 +57,7 @@ export async function fetchWithRetry(
       lastException = e instanceof Error ? e : new Error(String(e));
 
       // If this was the last attempt, throw
-      if (attempt === 2) {
+      if (attempt === 3) {
         throw lastException;
       }
 

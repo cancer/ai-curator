@@ -68,16 +68,31 @@ const NAMED_ENTITIES: Record<string, string> = {
   "&rdquo;": "”",
 };
 
+const REPLACEMENT_CHAR = "�";
+
+/**
+ * 数値文字参照のコードポイントを文字へ変換する。Unicode の範囲外
+ * （> 0x10FFFF）やサロゲート域（0xD800-0xDFFF）は String.fromCodePoint が
+ * RangeError を投げるため、変換せず U+FFFD に置き換える。外部 HTML の不正な
+ * 実体 1 個で要約バッチ全体が落ちるのを防ぐ。
+ */
+function codePointToChar(codePoint: number): string {
+  if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+    return REPLACEMENT_CHAR;
+  }
+  return String.fromCodePoint(codePoint);
+}
+
 function decodeEntities(text: string): string {
   let result = text;
   for (const [entity, char] of Object.entries(NAMED_ENTITIES)) {
     result = result.replaceAll(entity, char);
   }
   result = result.replace(/&#(\d+);/g, (_m, code) =>
-    String.fromCodePoint(parseInt(code, 10)),
+    codePointToChar(parseInt(code, 10)),
   );
   result = result.replace(/&#x([0-9a-fA-F]+);/g, (_m, code) =>
-    String.fromCodePoint(parseInt(code, 16)),
+    codePointToChar(parseInt(code, 16)),
   );
   return result;
 }
