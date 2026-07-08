@@ -4,3 +4,4 @@
 node_modules/
 poc/out/
 .wrangler/
+app/config.json
