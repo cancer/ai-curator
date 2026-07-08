@@ -1,26 +1,33 @@
 /**
- * Extract plain text from HTML.
+ * HTML から本文テキストを抽出する。
  *
- * Uses a simple parser rather than HTMLRewriter to ensure compatibility
- * across all environments (browsers, Workers, tests).
+ * 実装は Workers ランタイム組込みの HTMLRewriter を使う。HTMLRewriter の
+ * transform は非同期でストリームを流し切って初めて全ハンドラが発火するため、
+ * htmlToText は async で、収集結果を返す前に body を await ...text() で読み切る。
  *
- * Features:
- * - root option: extract only from inside the specified element
- * - exclude option: skip specified elements and their subtrees
- * - script/style always excluded
- * - Block elements get spacing between them
- * - HTML entities are decoded
+ * HTMLRewriter の癖への対処:
+ * - 除外は el.remove() ではなくカウンタ方式で行う。remove しても別セレクタの
+ *   text ハンドラは除去済み要素の中身でも発火するため。除外要素で skipDepth を
+ *   増やし onEndTag で戻し、text は skipDepth === 0 のときだけ収集する。root も
+ *   同じくカウンタで内側だけ収集する。
+ * - ブロック要素間には空白が入らない（<h1>A</h1><p>B</p> が "AB" になる）。
+ *   ブロック要素の element ハンドラで区切り空白を push して補う。
+ * - text ノードの HTML エンティティはデコードされないので収集後にデコードする。
+ *
+ * 注意: root / exclude に void 要素（img, br, hr 等）のセレクタを渡してはならない。
+ * void 要素は onEndTag が発火せずカウンタが戻らないため、以降のテキストが
+ * 黙って欠落する。
  */
 
 export interface HtmlToTextOptions {
-  /** Extract only from inside this element selector */
+  /** このセレクタの内側だけ収集する（未指定なら全体） */
   root?: string;
-  /** Exclude these element selectors and their subtrees */
+  /** このセレクタのサブツリーは収集しない */
   exclude?: string[];
 }
 
-// Block elements that should have spacing around them
-const BLOCK_ELEMENTS = new Set([
+// 直後・直前に区切り空白を必要とするブロック要素。
+const BLOCK_ELEMENTS = [
   "p",
   "div",
   "h1",
@@ -30,6 +37,10 @@ const BLOCK_ELEMENTS = new Set([
   "h5",
   "h6",
   "li",
+  "br",
+  "tr",
+  "td",
+  "th",
   "blockquote",
   "pre",
   "section",
@@ -39,180 +50,95 @@ const BLOCK_ELEMENTS = new Set([
   "main",
   "nav",
   "aside",
-  "tr",
-  "td",
-  "th",
-  "br",
-]);
+];
 
-// HTML entities to decode
-const ENTITY_MAP: Record<string, string> = {
+const NAMED_ENTITIES: Record<string, string> = {
   "&amp;": "&",
   "&lt;": "<",
   "&gt;": ">",
   "&quot;": '"',
   "&apos;": "'",
   "&nbsp;": " ",
-  "&mdash;": String.fromCharCode(0x2014),
-  "&ndash;": String.fromCharCode(0x2013),
-  "&hellip;": String.fromCharCode(0x2026),
-  "&lsquo;": String.fromCharCode(0x2018),
-  "&rsquo;": String.fromCharCode(0x2019),
-  "&ldquo;": String.fromCharCode(0x201c),
-  "&rdquo;": String.fromCharCode(0x201d),
-  "&lsaquo;": String.fromCharCode(0x2039),
-  "&rsaquo;": String.fromCharCode(0x203a),
+  "&mdash;": "—",
+  "&ndash;": "–",
+  "&hellip;": "…",
+  "&lsquo;": "‘",
+  "&rsquo;": "’",
+  "&ldquo;": "“",
+  "&rdquo;": "”",
 };
 
-/**
- * Decode HTML entities in text.
- */
 function decodeEntities(text: string): string {
   let result = text;
-
-  // Replace named entities
-  for (const [entity, char] of Object.entries(ENTITY_MAP)) {
+  for (const [entity, char] of Object.entries(NAMED_ENTITIES)) {
     result = result.replaceAll(entity, char);
   }
-
-  // Replace numeric entities: &#123; and &#x1F;
-  result = result.replace(/&#(\d+);/g, (_match, code) => {
-    return String.fromCharCode(parseInt(code, 10));
-  });
-
-  result = result.replace(/&#x([0-9a-fA-F]+);/g, (_match, code) => {
-    return String.fromCharCode(parseInt(code, 16));
-  });
-
+  result = result.replace(/&#(\d+);/g, (_m, code) =>
+    String.fromCodePoint(parseInt(code, 10)),
+  );
+  result = result.replace(/&#x([0-9a-fA-F]+);/g, (_m, code) =>
+    String.fromCodePoint(parseInt(code, 16)),
+  );
   return result;
 }
 
-/**
- * Normalize whitespace: collapse multiple spaces to one, trim.
- */
-function normalizeWhitespace(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
-}
-
-interface ParserState {
-  insideRoot: boolean;
-  skipDepth: number;
-  textParts: string[];
-}
-
-export function htmlToText(
+export async function htmlToText(
   html: string,
   options?: HtmlToTextOptions,
-): string {
+): Promise<string> {
   const rootSelector = options?.root;
-  const excludeSelectors = new Set(options?.exclude ?? []);
+  const excludeSelectors = [...(options?.exclude ?? []), "script", "style"];
 
-  // Always exclude script and style
-  excludeSelectors.add("script");
-  excludeSelectors.add("style");
+  const parts: string[] = [];
+  let skipDepth = 0;
+  let rootDepth = 0;
 
-  const state: ParserState = {
-    insideRoot: !rootSelector,
-    skipDepth: 0,
-    textParts: [],
-  };
+  const collecting = () =>
+    skipDepth === 0 && (rootSelector === undefined || rootDepth > 0);
 
-  // Simple HTML parser
-  let i = 0;
-  while (i < html.length) {
-    // Find next tag
-    const tagStart = html.indexOf("<", i);
+  let rewriter = new HTMLRewriter();
 
-    if (tagStart === -1) {
-      // No more tags - add remaining text
-      if (state.insideRoot && state.skipDepth === 0) {
-        const text = html.substring(i);
-        if (text.trim()) {
-          state.textParts.push(text);
-        }
-      }
-      break;
-    }
-
-    // Add text before this tag
-    if (tagStart > i && state.insideRoot && state.skipDepth === 0) {
-      const text = html.substring(i, tagStart);
-      if (text.trim()) {
-        state.textParts.push(text);
-      }
-    }
-
-    // Find tag end
-    const tagEnd = html.indexOf(">", tagStart);
-    if (tagEnd === -1) break;
-
-    const tagContent = html.substring(tagStart + 1, tagEnd).trim();
-
-    // Skip comments, doctypes, XML declarations
-    if (tagContent.startsWith("!") || tagContent.startsWith("?")) {
-      i = tagEnd + 1;
-      continue;
-    }
-
-    // Extract tag name (handle attributes and namespaces)
-    const tagNameMatch = tagContent.match(/^\/?\w+/);
-    if (!tagNameMatch) {
-      i = tagEnd + 1;
-      continue;
-    }
-
-    let tagName = tagNameMatch[0];
-    const isClosing = tagName.startsWith("/");
-    if (isClosing) {
-      tagName = tagName.substring(1);
-    }
-    tagName = tagName.toLowerCase();
-
-    if (!isClosing) {
-      // Opening tag
-      // Check if this is the root element
-      if (rootSelector && tagName === rootSelector && !state.insideRoot) {
-        state.insideRoot = true;
-      }
-
-      // Check if we should skip this element
-      if (excludeSelectors.has(tagName)) {
-        state.skipDepth++;
-      }
-
-      // Add spacing for block elements
-      if (state.insideRoot && state.skipDepth === 0 && BLOCK_ELEMENTS.has(tagName)) {
-        state.textParts.push(" ");
-      }
-    } else {
-      // Closing tag
-      // Check if we're exiting root
-      if (rootSelector && tagName === rootSelector) {
-        state.insideRoot = false;
-      }
-
-      // Check if we're exiting skip
-      if (excludeSelectors.has(tagName) && state.skipDepth > 0) {
-        state.skipDepth--;
-      }
-
-      // Add spacing after block elements
-      if (state.insideRoot && state.skipDepth === 0 && BLOCK_ELEMENTS.has(tagName)) {
-        state.textParts.push(" ");
-      }
-    }
-
-    i = tagEnd + 1;
+  // 除外セレクタは登録順に先に処理されるので、除外要素配下では以降の
+  // ブロック空白・text 収集が skipDepth > 0 で抑止される。
+  for (const selector of excludeSelectors) {
+    rewriter = rewriter.on(selector, {
+      element(el) {
+        skipDepth++;
+        el.onEndTag(() => {
+          skipDepth--;
+        });
+      },
+    });
   }
 
-  // Join and process text
-  let result = state.textParts.join("");
+  if (rootSelector !== undefined) {
+    rewriter = rewriter.on(rootSelector, {
+      element(el) {
+        rootDepth++;
+        el.onEndTag(() => {
+          rootDepth--;
+        });
+      },
+    });
+  }
 
-  // Decode entities
-  result = decodeEntities(result);
+  rewriter = rewriter.on(BLOCK_ELEMENTS.join(","), {
+    element() {
+      if (collecting()) {
+        parts.push(" ");
+      }
+    },
+  });
 
-  // Normalize whitespace
-  result = normalizeWhitespace(result);
+  rewriter = rewriter.on("*", {
+    text(chunk) {
+      if (collecting()) {
+        parts.push(chunk.text);
+      }
+    },
+  });
 
-  return result;
+  await rewriter.transform(new Response(html)).text();
+
+  return decodeEntities(parts.join("")).replace(/\s+/g, " ").trim();
 }

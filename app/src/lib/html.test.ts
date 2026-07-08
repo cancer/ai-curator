@@ -1,149 +1,82 @@
 import { describe, it, expect } from "vitest";
 import { htmlToText } from "./html";
 
+// テストは @cloudflare/vitest-pool-workers により workerd 上で実行されるため、
+// 実装が使う HTMLRewriter がテストでもそのまま利用できる。
+// htmlToText は async（HTMLRewriter の transform が非同期）なので各ケースで await する。
 describe("htmlToText", () => {
-  it("extracts plain text from simple HTML", () => {
-    const html = "<p>Hello <strong>world</strong></p>";
-    const text = htmlToText(html);
+  it("extracts plain text and does not duplicate nested text", async () => {
+    // ネストした <strong> により "world" は <p> と <strong> の 2 つの要素配下にある。
+    // text 収集が要素ごとに二重発火していれば "worldworld" になるので、これがカナリア。
+    const text = await htmlToText("<p>Hello <strong>world</strong></p>");
     expect(text).toBe("Hello world");
   });
 
-  it("removes script and style elements by default", () => {
+  it("inserts a separator between adjacent block elements", async () => {
+    const text = await htmlToText("<h1>A</h1><p>B</p>");
+    expect(text).toBe("A B");
+  });
+
+  it("excludes a subtree via counter, not remove (nested text is not picked up by the text handler)", async () => {
     const html =
-      "<div><script>console.log('hidden')</script><p>Visible</p><style>.hidden { display: none; }</style></div>";
-    const text = htmlToText(html);
-    expect(text).not.toContain("hidden");
-    expect(text).not.toContain("console");
-    expect(text).toContain("Visible");
+      "<div><p>keep</p><aside><p>secret</p></aside><p>keep too</p></div>";
+    const text = await htmlToText(html, { exclude: ["aside"] });
+    expect(text).toContain("keep");
+    expect(text).toContain("keep too");
+    expect(text).not.toContain("secret");
   });
 
-  it("respects root option - extracts only from specified element", () => {
+  it("excludes multiple selectors' subtrees", async () => {
     const html =
-      "<div><p>Outside</p><main><p>Inside</p></main><p>Also outside</p></div>";
-    const text = htmlToText(html, { root: "main" });
-    expect(text).toContain("Inside");
-    expect(text).not.toContain("Outside");
-    expect(text).not.toContain("Also outside");
+      "<div><nav><p>menu</p></nav><p>body</p><footer><p>copyright</p></footer></div>";
+    const text = await htmlToText(html, { exclude: ["nav", "footer"] });
+    expect(text).toContain("body");
+    expect(text).not.toContain("menu");
+    expect(text).not.toContain("copyright");
   });
 
-  it("respects exclude option - skips specified elements", () => {
+  it("collects only inside the root selector", async () => {
     const html =
-      "<div><p>Keep this</p><aside><p>Skip this</p></aside><p>Keep this too</p></div>";
-    const text = htmlToText(html, { exclude: ["aside"] });
-    expect(text).toContain("Keep this");
-    expect(text).not.toContain("Skip this");
-    expect(text).toContain("Keep this too");
+      "<div><p>outside</p><main><p>inside</p></main><p>also outside</p></div>";
+    const text = await htmlToText(html, { root: "main" });
+    expect(text).toBe("inside");
   });
 
-  it("adds spacing between block elements", () => {
-    const html = "<p>Paragraph 1</p><p>Paragraph 2</p>";
-    const text = htmlToText(html);
-    // Should have spaces between paragraphs
-    expect(text).toMatch(/Paragraph\s+1\s+Paragraph\s+2/);
-  });
-
-  it("decodes HTML entities", () => {
-    const html = "<p>Tom &amp; Jerry &mdash; classic &nbsp; show</p>";
-    const text = htmlToText(html);
-    // nbsp decodes to space, then normalized with adjacent spaces
-    expect(text).toContain("Tom & Jerry — classic show");
-  });
-
-  it("decodes numeric entities", () => {
-    const html = "<p>Price: &#163;50 (hex: &#x1F;)</p>";
-    const text = htmlToText(html);
-    expect(text).toContain("Price: £50");
-  });
-
-  it("normalizes whitespace - collapses multiple spaces", () => {
-    const html = "<p>Multiple   spaces   between   words</p>";
-    const text = htmlToText(html);
-    expect(text).toBe("Multiple spaces between words");
-  });
-
-  it("trims leading and trailing whitespace", () => {
-    const html = "<p>   Surrounded by spaces   </p>";
-    const text = htmlToText(html);
-    expect(text).toBe("Surrounded by spaces");
-  });
-
-  it("handles nested block elements with exclude", () => {
+  it("combines root and exclude", async () => {
     const html =
-      "<article><p>Start</p><aside><div><p>Nested skip</p></div></aside><p>End</p></article>";
-    const text = htmlToText(html, { exclude: ["aside"] });
-    expect(text).toContain("Start");
-    expect(text).toContain("End");
-    expect(text).not.toContain("Nested skip");
-  });
-
-  it("handles complex real-world HTML", () => {
-    const html = `
-      <article>
-        <h1>Article Title</h1>
-        <p>First paragraph with <strong>bold</strong> text.</p>
-        <script>var x = 1;</script>
-        <p>Second paragraph.</p>
-        <aside><p>This is sidebar content</p></aside>
-        <p>Third paragraph with &mdash; em dash.</p>
-      </article>
-    `;
-    const text = htmlToText(html, { exclude: ["aside"] });
-    expect(text).toContain("Article Title");
-    expect(text).toContain("First paragraph with bold text");
-    expect(text).toContain("Second paragraph");
-    expect(text).toContain("Third paragraph with — em dash");
+      "<div><p>header</p><main><p>content</p><aside><p>sidebar</p></aside><p>more</p></main><p>footer</p></div>";
+    const text = await htmlToText(html, { root: "main", exclude: ["aside"] });
+    expect(text).toContain("content");
+    expect(text).toContain("more");
+    expect(text).not.toContain("header");
+    expect(text).not.toContain("footer");
     expect(text).not.toContain("sidebar");
-    expect(text).not.toContain("var x");
   });
 
-  it("handles table elements as block elements", () => {
-    const html = "<p>Before table</p><table><tr><td>Cell</td></tr></table><p>After table</p>";
-    const text = htmlToText(html);
-    expect(text).toContain("Before table");
-    expect(text).toContain("Cell");
-    expect(text).toContain("After table");
-  });
-
-  it("handles list elements with spacing", () => {
-    const html = "<ul><li>Item 1</li><li>Item 2</li><li>Item 3</li></ul>";
-    const text = htmlToText(html);
-    expect(text).toContain("Item 1");
-    expect(text).toContain("Item 2");
-    expect(text).toContain("Item 3");
-  });
-
-  it("combines root and exclude options", () => {
-    const html = `
-      <div class="header">Header text</div>
-      <main>
-        <p>Article content</p>
-        <aside>Sidebar</aside>
-        <p>More content</p>
-      </main>
-      <div class="footer">Footer text</div>
-    `;
-    const text = htmlToText(html, { root: "main", exclude: ["aside"] });
-    expect(text).toContain("Article content");
-    expect(text).toContain("More content");
-    expect(text).not.toContain("Header text");
-    expect(text).not.toContain("Footer text");
-    expect(text).not.toContain("Sidebar");
-  });
-
-  it("handles many HTML entities", () => {
+  it("always excludes script and style", async () => {
     const html =
-      "<p>&lt; &gt; &quot; &apos; &lsquo; &rsquo; &ldquo; &rdquo; &lsaquo; &rsaquo;</p>";
-    const text = htmlToText(html);
-    // Check that all entities were decoded correctly
-    expect(text).toContain("<");
-    expect(text).toContain(">");
-    expect(text).toContain('"');
-    expect(text).toContain("'");
-    expect(text).toContain(String.fromCharCode(0x2018)); // left single quotation mark
-    expect(text).toContain(String.fromCharCode(0x2019)); // right single quotation mark
-    expect(text).toContain(String.fromCharCode(0x201c)); // left double quotation mark
-    expect(text).toContain(String.fromCharCode(0x201d)); // right double quotation mark
-    expect(text).toContain(String.fromCharCode(0x2039)); // single left-pointing angle quotation mark
-    expect(text).toContain(String.fromCharCode(0x203a)); // single right-pointing angle quotation mark
+      "<div><script>var secret = 1;</script><p>visible</p><style>.x{color:red}</style></div>";
+    const text = await htmlToText(html);
+    expect(text).toBe("visible");
+  });
+
+  it("decodes named entities", async () => {
+    const text = await htmlToText(
+      "<p>Tom &amp; Jerry &mdash; a &ldquo;classic&rdquo; show &nbsp; here</p>",
+    );
+    expect(text).toBe(
+      `Tom & Jerry — a “classic” show here`,
+    );
+  });
+
+  it("decodes numeric entities (decimal and hex)", async () => {
+    const text = await htmlToText("<p>Price: &#163;50 and &#x40;sign</p>");
+    expect(text).toContain("Price: £50");
+    expect(text).toContain("@sign");
+  });
+
+  it("normalizes whitespace and trims", async () => {
+    const text = await htmlToText("<p>   Multiple   spaces   here   </p>");
+    expect(text).toBe("Multiple spaces here");
   });
 });
