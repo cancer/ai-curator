@@ -15,7 +15,8 @@
 | LLM 要約の生成範囲 | **上位 10 件のみ日次バッチで先行生成**。11 位以下はタイトル + ヒット軸 + リンクのみ。「開いた時に要約」は v2 | 仕様 §8.2 の未確定論点。リアルタイム再 fetch 経路は複雑度が高く、v1 は 1 日 1 回バッチに閉じる |
 | 傾向サマリの時系列比較 | なし（当日分のみ） | 要件 FR-6.1 の未確定論点。日次集計の保存は v2 で判断 |
 | Queues / Vectorize | 使わない（直列 fetch / D1 内ベクトル） | 設計 §6 の段階導入方針どおり |
-| フィードバック学習・明示ルール | なし | 要件 FR-5 のとおり v2（実運用フェーズ後半） |
+| フィードバック | **収集（クリック記録・👍/👎）は v1 に含める**。学習（プロファイル還流）は v2 | FR-5（2026-07-08 更新）。収集しないと v2 学習の開始時データがゼロになる。明示ルール（ドメイン填/除外）は v2 のまま |
+| 設定管理 UI | **v1 に含める**（ソース・関心軸の Web 編集画面） | FR-8（2026-07-08 追加）。マルチデバイス利用のため CLI 前提では成り立たない |
 | Worker 構成 | **単一 Worker**（cron 2 本 + fetch ハンドラ） | 最小構成。cron の分岐は `controller.cron` で行える |
 | digest LLM モデル | config（KV）で切替可能にし、初期値は実装時に選定（タスク 8 参照） | PoC で llama-3.2-3b の日本語品質が不十分と実測済み |
 
@@ -120,10 +121,20 @@ CREATE TABLE interest_axes (
   id         INTEGER PRIMARY KEY,
   axis_id    TEXT NOT NULL UNIQUE,      -- 例: web-fw, ai, agentic-coding, software-design
   label      TEXT NOT NULL,             -- 表示名（例: Web FW）
+  seed_hash  TEXT NOT NULL,             -- seedText の SHA-256。設定変更の検知用（タスク 7）
   embedding  TEXT NOT NULL,             -- JSON 数値配列
   embedding_model TEXT NOT NULL,
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- フィードバック（v1 は収集のみ。学習での利用は v2）
+CREATE TABLE feedback (
+  id          INTEGER PRIMARY KEY,
+  article_id  INTEGER NOT NULL REFERENCES articles(id),
+  kind        TEXT NOT NULL CHECK (kind IN ('click', 'up', 'down')),
+  created_at  TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_feedback_article ON feedback(article_id);
 
 CREATE TABLE feed_entries (
   id          INTEGER PRIMARY KEY,
@@ -181,7 +192,8 @@ CREATE TABLE feed_trends (
 
   - 起動時（各 cron 実行の冒頭）に KV から読み、必須フィールドの欠落は即エラーで落とす（フェイルファスト。黙って既定値にしない）
   - 数値パラメータは上記が暫定確定値（PoC で「上位/下位の分離が機能する」ことを確認済みの値）
-- **投入手順も書く**: `wrangler kv key put --binding CONFIG "config:v1" --path config.json --remote`（config.json はコミットしない。`.gitignore` に追加）
+- **投入手順も書く**: 初回のみ `wrangler kv key put --binding CONFIG "config:v1" --path config.json --remote`（config.json はコミットしない。`.gitignore` に追加）。**初回投入後の変更は設定画面（タスク 9）から行う**のが正の経路。Worker 側から `env.CONFIG.put("config:v1", ...)` で書き戻すため、KV の値が常に最新の正
+- 読み書きが 1 箇所になるよう、`loadConfig(env)` と `saveConfig(env, config)`（バリデーション込み）を config.ts に置く。バリデーション違反の保存は 400 で拒否（壊れた設定で cron を走らせない）
 
 ### タスク 4: 共通ユーティリティ
 
@@ -280,7 +292,7 @@ interface NormalizedArticle {
   - 5xx・例外はタスク 4(b) と同方針でリトライ（AI バインディング呼び出しにも一時エラーがある。PoC 実測）
   - 返り値: `{ vector: number[], inputTokens?: number }`。レスポンスの `meta`（`cost_metric_value_1` = input tokens, `neurons`）があれば記録し、実行サマリのログに合計を出す（コスト監視。ダッシュボードとの突き合わせ用）
   - Embedding を保存する際は **`embedding_model` カラムに必ずモデル名を書く**（前提知識 8）。読み出し時はモデル名が一致するベクトルだけを比較に使う
-- **関心軸ベクトルの初期化**: Cron B の冒頭で interest_axes を読み、`config.interestAxes` に対して (a) 未登録の軸 (b) seedText 変更（KV 側に seedTextHash を持つのではなく、テーブルに無い/embedding_model 不一致の軸）を Embedding して upsert する
+- **関心軸ベクトルの同期**: Cron B の冒頭で interest_axes を読み、`config.interestAxes` の各軸について次のいずれかに該当したら seedText を Embedding して upsert する: (a) テーブルに未登録 (b) `sha256(seedText) ≠ seed_hash`（設定画面での変更検知） (c) `embedding_model` が config と不一致（モデル入替）。config から消えた軸は行を削除する
 
 ### タスク 8: Feed Builder（Cron B）
 
@@ -305,17 +317,31 @@ interface NormalizedArticle {
 - **digest LLM モデルの選定**（実装時に行う）: Workers AI のテキスト生成モデル一覧（https://developers.cloudflare.com/workers-ai/models/）から日本語対応を明記するモデルを 2〜3 候補選び、実記事 5 件で日本語要約品質を目視比較して初期値を決める。**llama-3.2-3b-instruct は日本語品質不十分のため選ばない**（前提知識 10）。モデル id は KV 設定値なのでコード変更なしに差し替え可能
 - **テスト**: score / cosine / freshness / 意味的 Dedup / SimHash 以外に、「本文なし記事が混ざっても要約ステップが落ちない」ことをモックでテスト
 
-### タスク 9: Viewer
+### タスク 9: Viewer + 設定画面 + フィードバック収集
 
-- **対象**: `app/src/viewer/index.ts`（+ 必要なら handler 分割）
-- **作業内容**:
+- **対象**: `app/src/viewer/index.ts`（フィード表示）`app/src/viewer/settings.ts`（設定画面）`app/src/viewer/feedback.ts`（FB 収集）
+- **前提**: 全ルートが Cloudflare Access の内側（タスク 10）。Access 未設定のうちは本番投入しない
+
+**(a) フィード表示**
   - `GET /` : 最新 date のフィードを HTML で返す。構成は上から (1) 軸ごとの傾向サマリ（feed_trends: label・件数・narrative） (2) ランク順の記事リスト
-  - 記事リストの各項目: rank・タイトル（一次ソースへのリンク。**出典 URL 必須**）・媒体名・公開日時・ヒット軸ラベル・要約（あれば）
+  - 記事リストの各項目: rank・タイトル・媒体名・公開日時・ヒット軸ラベル・要約（あれば）・👍/👎 ボタン
+  - **記事タイトルのリンク先は `GET /r/{feed_entry_id}`**（下記 (c) のクリック記録リダイレクト）。表示上は一次ソースの URL も併記する（出典の明示。FR-6）
   - ページング: `GET /?page=2` で rank 21〜40 を返す「もっと見る」リンク（1 ページ 20 件）。SPA にしない（素の HTML + リンクで足りる。シンプル優先）
-  - `GET /api/feed?date=YYYY-MM-DD&page=N` : 同内容の JSON（将来のクライアント用。任意）
-  - デザインは最小限（システムフォント・シングルカラム）。CSS フレームワーク禁止
+  - デザインは最小限（システムフォント・シングルカラム）。CSS フレームワーク禁止。ただしモバイルで読める viewport 設定とタップ可能なボタンサイズは確保する（利用は主にスマホの想定）
   - **公開経路を作らない**: RSS 出力・共有リンク・SNS 投稿機能を実装しない（要件 FR-7）
-- **テスト**: ランク順で並ぶこと・ページング境界・要約 NULL の表示
+
+**(b) 設定画面（FR-8）**
+  - `GET /settings` : 現在の config（KV）をフォームで表示。編集対象は (1) 関心軸（label / seedText の編集、軸の追加・削除） (2) ソース（githubRepos / mediumAuthorFeeds / mediumTagFeeds の各リスト、hnMinPoints）。scoring 等の数値パラメータは v1 では表示のみ（誤操作防止。変更は wrangler で）
+  - `POST /settings` : バリデーション（axis id 形式、repo が `owner/name` 形式、数値範囲）を通れば `saveConfig` で KV を更新し、303 で `GET /settings` に戻す。エラーは 400 + 入力値保持
+  - seedText を変更した場合、次回 Cron B で関心軸ベクトルが自動再生成される（タスク 7 の seed_hash 検知）。その旨を画面に注記する
+  - フォームは素の HTML `<form method="post">`。JS 必須にしない
+
+**(c) フィードバック収集（FR-5 の収集のみ。学習は v2）**
+  - `GET /r/{feed_entry_id}` : feedback に `kind='click'` を insert → 一次ソース URL へ 302。該当 entry が無ければ 404
+  - `POST /api/feedback` : body `{ feed_entry_id, kind: "up" | "down" }` → feedback に insert。フィード画面の 👍/👎 から呼ぶ（最小のインライン JS で fetch、失敗時は無視でよい）
+  - v1 では収集のみ。**feedback テーブルを読む処理を実装しない**（学習は v2 スコープ。先回り実装をしない）
+
+- **テスト**: ランク順・ページング境界・要約 NULL 表示 / 設定のバリデーション（不正 repo 形式・空 seedText の拒否、正常系の KV 書き込み） / `/r/` のクリック記録とリダイレクト・存在しない id の 404 / feedback insert
 
 ### タスク 10: デプロイ・Access 設定・運用確認
 
@@ -332,7 +358,9 @@ interface NormalizedArticle {
   - [ ] フィード上位がゴミだらけでない・下位に技術外トピックが沈む
   - [ ] 要約が自然な日本語である
   - [ ] articles・feed_entries のどこにも記事本文が保存されていない（SELECT で確認）
-  - [ ] 未認証アクセスが Access でブロックされる
+  - [ ] 未認証アクセスが Access でブロックされる（`/` `/settings` `/r/1` すべて）
+  - [ ] スマホから設定画面でソース追加・関心軸の seedText 編集ができ、翌日のフィードに反映される
+  - [ ] 記事リンクのクリックと 👍/👎 が feedback テーブルに記録される
 
 ## 6. 修正対象ファイル一覧
 
@@ -346,6 +374,8 @@ interface NormalizedArticle {
 - `app/src/adapters/types.ts` `github.ts` `hn.ts` `medium.ts` `fowler.ts` — ソースアダプタ（各 `.test.ts` 併設）
 - `app/src/pipeline/fetch.ts` `feed.ts` — cron パイプライン
 - `app/src/viewer/index.ts` — フィード表示
+- `app/src/viewer/settings.ts` — 設定画面（KV 読み書き）
+- `app/src/viewer/feedback.ts` — クリック記録リダイレクト + 評価 API
 - `app/test/fixtures/*` — 合成 fixture（実データ禁止）
 - ルート `.gitignore` に `app/config.json` を追加
 
