@@ -3,9 +3,9 @@
  *
  * feed: https://martinfowler.com/feed.atom（Atom）
  *   entry の link@href / title / updated（→publishedAt ISO）/
- *   content（HTML → htmlToText → 先頭 FEED_SUMMARY_CHARS 字 → feedSummary）。
- *   Atom content はほぼ本文全文のため、切り詰めずに保存すると法務原則
- *   「本文全文の原文を保存しない」に抵触する。url は link@href を正規化。
+ *   content（HTML → htmlToText → feedSummary）。feedSummary は非永続（DB・KV・
+ *   ログに書かない）ため切り詰めない。埋め込み入力は下流で maxInputChars に
+ *   切り詰められる。url は link@href を正規化。
  * 記事本文: 記事 URL を fetch（user-agent 付与）し、<main> の内側から
  *   ナビ・見出し等を除いて抽出する。連続アクセスの間隔制御は呼び出し側が担う。
  *   <main> が見つからない（抽出結果が空）ページは throw（サイト構造変更の検知）。
@@ -16,7 +16,7 @@ import { normalizeUrl } from "../lib/normalize";
 import { htmlToText } from "../lib/html";
 import { feedParserOptions } from "../lib/xml";
 import { fetchWithRetry, type FetchWithRetryOptions } from "../lib/retry";
-import { ensureArray, type NormalizedArticle } from "./types";
+import { ensureArray, withinWindow, type NormalizedArticle } from "./types";
 
 interface AtomLink {
   "@_href": string;
@@ -36,9 +36,6 @@ interface AtomEntry {
 
 const SOURCE = "fowler";
 const USER_AGENT = "ai-curator";
-
-/** feedSummary に保存する content の最大文字数（本文全文の原文保存を避ける）。 */
-const FEED_SUMMARY_CHARS = 300;
 
 /** 記事本文抽出。<main> 内から本文以外の定型要素を除外する。 */
 const ARTICLE_ROOT = "main";
@@ -78,10 +75,7 @@ export async function parseFeed(xml: string): Promise<NormalizedArticle[]> {
       title: String(entry.title),
       source: SOURCE,
       publishedAt: new Date(String(entry.updated)).toISOString(),
-      feedSummary: (await htmlToText(contentText(entry.content))).slice(
-        0,
-        FEED_SUMMARY_CHARS,
-      ),
+      feedSummary: await htmlToText(contentText(entry.content)),
     })),
   );
 }
@@ -117,11 +111,12 @@ export async function fetchArticleBody(
 }
 
 /**
- * feed のみを取得する（記事本文は取得しない）。Cron A 用。
- * feedSummary は埋まるが body は付かない。本文取得は Cron B が
- * fetchArticleBody で上位のみ行う。
+ * feed のみを取得する（記事本文は取得しない）。feedSummary は埋まるが body は
+ * 付かない。本文取得は日次パスの要約段が fetchArticleBody で行う。feed は非
+ * ページングなので、取得分から当日ウィンドウ内に絞る。
  */
 export async function fetchFowlerFeed(
+  windowStart: Date,
   options?: FetchWithRetryOptions,
 ): Promise<NormalizedArticle[]> {
   const res = await fetchWithRetry(
@@ -133,5 +128,5 @@ export async function fetchFowlerFeed(
     console.warn(`fowler: feed returned ${res.status}; skipping`);
     return [];
   }
-  return parseFeed(await res.text());
+  return withinWindow(await parseFeed(await res.text()), windowStart);
 }

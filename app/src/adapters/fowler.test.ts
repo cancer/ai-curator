@@ -41,8 +41,9 @@ describe("parseFeed", () => {
     expect(first.body).toBeUndefined();
   });
 
-  it("truncates feedSummary to 300 chars (never stores near-full body text)", async () => {
-    const longContent = "<content>" + "あ".repeat(1000) + "</content>";
+  it("keeps the full feedSummary without truncation (non-persistent, so no 300-char cap)", async () => {
+    const longContent =
+      '<content type="html">&lt;p&gt;' + "あ".repeat(1000) + "&lt;/p&gt;</content>";
     const xml =
       '<?xml version="1.0" encoding="utf-8"?>' +
       '<feed xmlns="http://www.w3.org/2005/Atom">' +
@@ -55,7 +56,8 @@ describe("parseFeed", () => {
       "</feed>";
 
     const [article] = await parseFeed(xml);
-    expect(article.feedSummary!.length).toBeLessThanOrEqual(300);
+    // Old behaviour capped this at 300; it must now retain the full content.
+    expect(article.feedSummary!.length).toBeGreaterThan(300);
   });
 });
 
@@ -91,13 +93,16 @@ describe("extractArticleBody", () => {
 });
 
 describe("fetchFowlerFeed", () => {
+  // フィクスチャの entry は 2025-07-07 更新。ウィンドウ下限をそれ以前に置いて全件通す。
+  const WINDOW_ALL = new Date("2025-01-01T00:00:00.000Z");
+
   it("fetches only the feed (no per-article body fetch) and never sets body", async () => {
     const fetch = vi.fn(
       async (_url: RequestInfo | URL) =>
         new Response(fowlerFeedXml, { status: 200 }),
     );
 
-    const articles = await fetchFowlerFeed({ fetch });
+    const articles = await fetchFowlerFeed(WINDOW_ALL, { fetch });
 
     // The feed is fetched exactly once; article pages are not fetched.
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -111,11 +116,25 @@ describe("fetchFowlerFeed", () => {
     }
   });
 
+  it("keeps only entries within the day window", async () => {
+    const fetch = vi.fn(
+      async (_url: RequestInfo | URL) =>
+        new Response(fowlerFeedXml, { status: 200 }),
+    );
+
+    // Window lower bound after both fixture entries (2025-07-07) -> none kept.
+    const articles = await fetchFowlerFeed(
+      new Date("2026-01-01T00:00:00.000Z"),
+      { fetch },
+    );
+    expect(articles).toEqual([]);
+  });
+
   it("returns [] on a non-ok feed response", async () => {
     // 4xx returns immediately from fetchWithRetry (no backoff sleeps).
     const fetch = vi.fn(async (_url: RequestInfo | URL) =>
       new Response("nope", { status: 404 }),
     );
-    expect(await fetchFowlerFeed({ fetch })).toEqual([]);
+    expect(await fetchFowlerFeed(WINDOW_ALL, { fetch })).toEqual([]);
   });
 });

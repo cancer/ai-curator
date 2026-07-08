@@ -1,14 +1,11 @@
 /**
  * AI curator 実運用 v1 — 単一 Worker のエントリポイント。
  *
- * - scheduled: cron 2本(Cron A=fetch / Cron B=feed構築)
+ * - scheduled: cron 1本(日次パス: 取得〜要約を単一パスで実行)
  * - fetch: Viewer(閲覧・設定・フィードバック収集)
- *
- * 各パイプラインの実装は後続タスクで配線する。
  */
 
-import { runFetchPipeline } from "./pipeline/fetch";
-import { runFeedBuilder } from "./pipeline/feed";
+import { runDaily } from "./pipeline/daily";
 import { renderFeedPage } from "./viewer/index";
 import { renderSettingsForm, handleSettingsUpdate } from "./viewer/settings";
 import { handleClickRedirect, handleFeedbackApi } from "./viewer/feedback";
@@ -20,21 +17,10 @@ export interface Env {
   CONFIG: KVNamespace;
 }
 
-/** Cron A: 3時間ごとにソースを fetch する。 */
-const CRON_FETCH = "0 */3 * * *";
-/** Cron B: 21:00 UTC(朝6時JST)に feed を構築する。 */
-const CRON_BUILD_FEED = "0 21 * * *";
-
 export default {
-  async scheduled(controller, env, _ctx) {
-    switch (controller.cron) {
-      case CRON_FETCH:
-        await runFetchPipeline(env);
-        return;
-      case CRON_BUILD_FEED:
-        await runFeedBuilder(env);
-        return;
-    }
+  async scheduled(_controller, env, _ctx) {
+    // cron は 1 本なので分岐しない。取得〜要約を単一パスで実行する。
+    await runDaily(env);
   },
 
   async fetch(request, env, _ctx) {

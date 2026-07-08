@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { parseAuthorFeed, parseTagFeed } from "./medium";
+import { describe, it, expect, vi } from "vitest";
+import { parseAuthorFeed, parseTagFeed, fetchAuthorFeed, fetchTagFeed } from "./medium";
 import { mediumAuthorFeedXml } from "../../test/fixtures/medium-author-feed";
 import { mediumTagFeedXml } from "../../test/fixtures/medium-tag-feed";
 
@@ -57,5 +57,46 @@ describe("parseTagFeed", () => {
     expect(article.feedSummary).not.toMatch(/<[^>]+>/);
     expect(article.publishedAt).toBe("2025-07-06T18:45:00.000Z");
     expect(article.url).toBe("https://medium.com/@someone/fake-outage-aabbccdd");
+  });
+});
+
+describe("fetchAuthorFeed / fetchTagFeed — day window filter", () => {
+  it("keeps items within the window and drops older ones (author feed)", async () => {
+    const fetch = vi.fn(
+      async () => new Response(mediumAuthorFeedXml, { status: 200 }),
+    );
+    // Fixture items are 2025-07 -> window before keeps all, after keeps none.
+    const kept = await fetchAuthorFeed(
+      "madeup",
+      new Date("2025-01-01T00:00:00.000Z"),
+      { fetch },
+    );
+    expect(kept.length).toBeGreaterThan(0);
+
+    const none = await fetchAuthorFeed(
+      "madeup",
+      new Date("2026-01-01T00:00:00.000Z"),
+      { fetch },
+    );
+    expect(none).toEqual([]);
+  });
+
+  it("keeps items within the window and drops older ones (tag feed)", async () => {
+    const fetch = vi.fn(
+      async () => new Response(mediumTagFeedXml, { status: 200 }),
+    );
+    const kept = await fetchTagFeed(
+      "madeuptag",
+      new Date("2025-01-01T00:00:00.000Z"),
+      { fetch },
+    );
+    expect(kept.length).toBeGreaterThan(0);
+
+    const none = await fetchTagFeed(
+      "madeuptag",
+      new Date("2026-01-01T00:00:00.000Z"),
+      { fetch },
+    );
+    expect(none).toEqual([]);
   });
 });

@@ -6,9 +6,8 @@
 構成（`wrangler.jsonc`）:
 
 - Worker 名: `ai-curator`（`src/index.ts`）
-- cron 2 本（`triggers.crons`）:
-  - `0 */3 * * *` — Cron A（3 時間ごとにソースを fetch）
-  - `0 21 * * *` — Cron B（21:00 UTC = 朝 6 時 JST に feed 構築）
+- cron 1 本（`triggers.crons`）:
+  - `0 21 * * *` — 日次パス（21:00 UTC = 朝 6 時 JST）。取得〜全件要約までを 1 実行で行う（`runDaily`）
 - バインディング: `AI`（Workers AI）/ `DB`（D1）/ `CONFIG`（KV）
 - `observability.enabled: true`
 
@@ -129,7 +128,6 @@ npx wrangler kv namespace create CONFIG
   },
   "digest": {
     "model": "REPLACE_WITH_DIGEST_MODEL",
-    "summaryTopN": 10,
     "maxOutputTokens": 300
   }
 }
@@ -209,10 +207,7 @@ npx wrangler dev --test-scheduled
 別ターミナルで、cron 式をクエリに渡して発火させる:
 
 ```bash
-# Cron A（fetch）
-curl "http://localhost:8787/__scheduled?cron=0+*/3+*+*+*"
-
-# Cron B（feed 構築）
+# 日次パス（取得〜全件要約までを 1 実行）
 curl "http://localhost:8787/__scheduled?cron=0+21+*+*+*"
 ```
 
@@ -229,8 +224,7 @@ npx wrangler tail
 
 - フィード（`/`）が生成されていること。
 - 要約品質（自然な日本語か）。
-- Workers AI ダッシュボードの **neurons 消費**（想定 100 neurons/日 以下。
-  **1,000 を超えたら調査**）。
+- Workers AI ダッシュボードの **neurons 消費**。全件要約のため記事件数に比例する（個人規模なら無料枠 10,000/日に十分収まる想定。実測して桁を把握し、継続的に無料枠を超えるなら記事件数・モデルを見直す）。
 
 ---
 
@@ -248,14 +242,16 @@ npx wrangler tail
 本文非保存の確認例（本番 D1 に対して）:
 
 ```bash
+# articles に feed_summary/body 列が無いこと（原文非永続）を確認
 npx wrangler d1 execute ai-curator-db --remote \
-  --command "SELECT id, url, title, feed_summary FROM articles LIMIT 20;"
+  --command "SELECT id, url, title, source FROM articles LIMIT 20;"
 npx wrangler d1 execute ai-curator-db --remote \
   --command "SELECT date, rank, summary FROM feed_entries ORDER BY date DESC, rank LIMIT 20;"
 ```
 
-`articles` に保存されるのは `title` と `feed_summary`（フィード提供の要約）まで。
-`feed_entries.summary` は LLM 要約（上位 10 件のみ）。いずれも記事本文の完全複製ではない。
+`articles` に保存されるのは metadata（`url`/`title`/`source`/`published_at`）・`content_hash`・
+`embedding`(+モデル名)・`score`/`hit_axis` のみ。**フィード提供の要約・本文などの原文テキストは列ごと持たない**（取得時にメモリで埋め込み・要約に使い破棄）。
+`feed_entries.summary` は自前生成の LLM 要約（**全件**。取得失敗時のみ NULL）。いずれも記事本文の複製ではない。
 
 ---
 
@@ -264,8 +260,8 @@ npx wrangler d1 execute ai-curator-db --remote \
 ### GitHub リリースの SimHash 衝突
 
 近傍重複判定に使う SimHash の入力は
-`` `${article.title} ${article.feedSummary ?? ""}` ``（`src/pipeline/fetch.ts:123`。
-保存対象と揃え、本文は含めない）。
+`` `${article.title} ${article.feedSummary ?? ""}` ``（`src/pipeline/daily.ts`。
+`feedSummary` はメモリ上の一時値で、ハッシュ計算に使うが永続化はしない）。
 
 GitHub リリースは `feedSummary` を持たず**タイトルのみ**でハッシュ化されるため、
 **異なるリポジトリが完全に同一のリリースタイトル（例 `"v1.0.0"`）を持つ場合、
@@ -278,5 +274,6 @@ GitHub リリースは `feedSummary` を持たず**タイトルのみ**でハッ
 ### その他
 
 - 傾向サマリ（`feed_trends`）は時系列比較なし。当日分のみ。
-- 要約は上位 10 件のみ先行生成（`digest.summaryTopN`）。11 位以下はタイトル + 軸 + リンクのみ。
+- 要約はフィード全件に生成する（本文取得失敗時のみ NULL）。上位 N 件限定は廃止。
+- HN のリンク先本文は粗いタグ除去で取得するため、要約入力にヘッダ等のノイズが混じりうる（SPA/ペイウォール等では取得失敗しタイトルにフォールバック）。
 - フィードバック（`feedback` テーブル）は**収集のみ**。スコアリングへの学習利用は v2。

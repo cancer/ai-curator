@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   summarizeArticle,
   summarizeTrend,
-  summarizeTopEntries,
+  summarizeEntries,
   type SummaryTarget,
 } from "./summarize";
 
@@ -101,7 +101,7 @@ describe("summarizeTrend", () => {
   });
 });
 
-describe("summarizeTopEntries", () => {
+describe("summarizeEntries", () => {
   function target(overrides: Partial<SummaryTarget> = {}): SummaryTarget {
     return {
       articleId: 1,
@@ -113,13 +113,13 @@ describe("summarizeTopEntries", () => {
     };
   }
 
-  const digest = { model: "@cf/model", summaryTopN: 10, maxOutputTokens: 300 };
+  const digest = { model: "@cf/model", maxOutputTokens: 300 };
 
   it("summarizes each target and returns summaries keyed by article id", async () => {
     const { ai } = mockAi(async () => ({ response: "s" }));
     const resolveBody = async () => "本文テキスト";
 
-    const { summaries, failed } = await summarizeTopEntries(
+    const { summaries, failed } = await summarizeEntries(
       ai,
       digest,
       [target({ articleId: 1 }), target({ articleId: 2 })],
@@ -139,7 +139,7 @@ describe("summarizeTopEntries", () => {
     });
     const resolveBody = async () => null;
 
-    const { summaries, failed } = await summarizeTopEntries(
+    const { summaries, failed } = await summarizeEntries(
       ai,
       digest,
       [target({ articleId: 1, feedSummary: "これはフィード要約" })],
@@ -157,7 +157,7 @@ describe("summarizeTopEntries", () => {
       throw new Error("re-fetch failed");
     };
 
-    const { summaries, failed } = await summarizeTopEntries(
+    const { summaries, failed } = await summarizeEntries(
       ai,
       digest,
       [target({ articleId: 1 }), target({ articleId: 2 })],
@@ -179,7 +179,7 @@ describe("summarizeTopEntries", () => {
     const resolveBody = async (t: SummaryTarget) => t.title;
     const noSleep = async () => {};
 
-    const { summaries, failed } = await summarizeTopEntries(
+    const { summaries, failed } = await summarizeEntries(
       ai,
       digest,
       [

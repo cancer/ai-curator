@@ -51,7 +51,6 @@ export interface EmbeddingConfig {
 
 export interface DigestConfig {
   model: string;
-  summaryTopN: number;
   maxOutputTokens: number;
 }
 
@@ -306,17 +305,12 @@ function validateDigestConfig(digest: unknown): DigestConfig {
     throw new Error("digest.model must be a non-empty string");
   }
 
-  if (typeof obj.summaryTopN !== "number" || obj.summaryTopN <= 0) {
-    throw new Error("digest.summaryTopN must be a positive integer");
-  }
-
   if (typeof obj.maxOutputTokens !== "number" || obj.maxOutputTokens <= 0) {
     throw new Error("digest.maxOutputTokens must be a positive integer");
   }
 
   return {
     model: obj.model,
-    summaryTopN: obj.summaryTopN,
     maxOutputTokens: obj.maxOutputTokens,
   };
 }

@@ -7,8 +7,8 @@
     "enabled": true
   },
   "triggers": {
-    // 3時間ごと=Cron A(fetch) / 21:00 UTC=朝6時JST=Cron B(feed構築)
-    "crons": ["0 */3 * * *", "0 21 * * *"]
+    // 21:00 UTC=朝6時JST に日次パス(取得〜要約を単一パスで実行)を1回走らせる
+    "crons": ["0 21 * * *"]
   },
   "ai": {
     "binding": "AI"

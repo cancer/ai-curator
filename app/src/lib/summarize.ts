@@ -108,7 +108,7 @@ export interface SummaryTarget {
   feedSummary: string | null;
 }
 
-export interface TopEntriesResult {
+export interface SummarizeResult {
   /** article_id → 生成要約。 */
   summaries: Map<number, string>;
   /** 要約に失敗して除外した件数。 */
@@ -116,17 +116,17 @@ export interface TopEntriesResult {
 }
 
 /**
- * 上位エントリを要約する。各エントリで本文を再取得（resolveBody）し、
- * 取得できなければ feedSummary にフォールバックする。1 件の要約失敗は
- * try/catch で除外し件数を数えて、ループは止めない。
+ * フィード対象エントリを要約する（全件。上位 N 件で絞らない）。各エントリで
+ * 本文を resolveBody で解決し、取得できなければ feedSummary にフォールバック
+ * する。1 件の要約失敗は try/catch で除外し件数を数えて、ループは止めない。
  */
-export async function summarizeTopEntries(
+export async function summarizeEntries(
   ai: Ai,
   digest: DigestConfig,
   targets: SummaryTarget[],
   resolveBody: (target: SummaryTarget) => Promise<string | null>,
   sleep?: (ms: number) => Promise<void>,
-): Promise<TopEntriesResult> {
+): Promise<SummarizeResult> {
   const summaries = new Map<number, string>();
   let failed = 0;
 

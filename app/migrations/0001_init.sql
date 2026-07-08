@@ -4,9 +4,9 @@ CREATE TABLE articles (
   title         TEXT NOT NULL,
   source        TEXT NOT NULL,          -- 例: github:owner/repo, hn, medium:@author, medium:tag/x, fowler
   published_at  TEXT NOT NULL,          -- ISO 8601
-  feed_summary  TEXT,                   -- フィード提供の要約（保存可）
-  content_hash  TEXT,                   -- SimHash（16進文字列）
-  embedding     TEXT,                   -- JSON 数値配列。Cron B が書く
+  -- feed_summary 列は持たない（原文由来のため非永続。2026-07-09 改定）
+  content_hash  TEXT,                   -- SimHash（16進文字列。title+フィード提供テキストから算出）
+  embedding     TEXT,                   -- JSON 数値配列。日次パスが書く
   embedding_model TEXT,                 -- ベクトル生成モデル名。embedding とセットで必須
   score         REAL,
   hit_axis      TEXT,                   -- max cosine を与えた関心軸 id
@@ -38,7 +38,7 @@ CREATE TABLE feed_entries (
   date        TEXT NOT NULL,            -- YYYY-MM-DD（フィード生成日）
   article_id  INTEGER NOT NULL REFERENCES articles(id),
   rank        INTEGER NOT NULL,         -- スコア降順 1 始まり
-  summary     TEXT,                     -- LLM 要約（上位 10 件のみ。他は NULL）
+  summary     TEXT,                     -- LLM 要約（全件生成。本文取得失敗時のみ NULL）
   UNIQUE(date, article_id)
 );
 CREATE INDEX idx_feed_date_rank ON feed_entries(date, rank);

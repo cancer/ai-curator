@@ -40,7 +40,7 @@ function baseConfig(): Config {
       sourceTrust: { github: 1, fowler: 1, medium: 0.7, hn: 0.5 },
     },
     embedding: { model: "m", maxInputChars: 1000 },
-    digest: { model: "d", summaryTopN: 10, maxOutputTokens: 300 },
+    digest: { model: "d", maxOutputTokens: 300 },
   };
 }
 

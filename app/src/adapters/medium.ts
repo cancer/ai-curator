@@ -15,7 +15,7 @@ import { normalizeUrl } from "../lib/normalize";
 import { htmlToText } from "../lib/html";
 import { feedParserOptions } from "../lib/xml";
 import { fetchWithRetry, type FetchWithRetryOptions } from "../lib/retry";
-import { ensureArray, type NormalizedArticle } from "./types";
+import { ensureArray, withinWindow, type NormalizedArticle } from "./types";
 
 interface RssItem {
   title: string;
@@ -74,6 +74,7 @@ export function parseTagFeed(
 
 export async function fetchAuthorFeed(
   author: string,
+  windowStart: Date,
   options?: FetchWithRetryOptions,
 ): Promise<NormalizedArticle[]> {
   const res = await fetchWithRetry(
@@ -85,11 +86,13 @@ export async function fetchAuthorFeed(
     console.warn(`medium: @${author} feed returned ${res.status}; skipping`);
     return [];
   }
-  return parseAuthorFeed(await res.text(), author);
+  // feed は非ページングなので、取得分から当日ウィンドウ内に絞る。
+  return withinWindow(await parseAuthorFeed(await res.text(), author), windowStart);
 }
 
 export async function fetchTagFeed(
   tag: string,
+  windowStart: Date,
   options?: FetchWithRetryOptions,
 ): Promise<NormalizedArticle[]> {
   const res = await fetchWithRetry(
@@ -101,5 +104,5 @@ export async function fetchTagFeed(
     console.warn(`medium: tag/${tag} feed returned ${res.status}; skipping`);
     return [];
   }
-  return parseTagFeed(await res.text(), tag);
+  return withinWindow(await parseTagFeed(await res.text(), tag), windowStart);
 }

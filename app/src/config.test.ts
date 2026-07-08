@@ -44,7 +44,6 @@ const validConfig: Config = {
   },
   digest: {
     model: "gpt-4",
-    summaryTopN: 10,
     maxOutputTokens: 300,
   },
 };
@@ -393,20 +392,6 @@ describe("config", () => {
 
       await expect(loadConfig(env)).rejects.toThrow(
         "embedding.maxInputChars must be a positive integer"
-      );
-    });
-
-    it("should throw when digest.summaryTopN is not positive", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        digest: { ...validConfig.digest, summaryTopN: -5 },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "digest.summaryTopN must be a positive integer"
       );
     });
 

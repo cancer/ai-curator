@@ -33,3 +33,17 @@ export function ensureArray<T>(value: T | T[] | undefined): T[] {
   }
   return Array.isArray(value) ? value : [value];
 }
+
+/**
+ * 当日ウィンドウ（publishedAt >= windowStart）の記事だけを残す。非ページングな
+ * feed（medium / fowler）は取得分からこの関数で当日分に絞る。ページング API
+ * （github / hn）はページ送りの停止条件やクエリで当日分に絞るため使わない。
+ */
+export function withinWindow(
+  articles: NormalizedArticle[],
+  windowStart: Date,
+): NormalizedArticle[] {
+  return articles.filter(
+    (article) => new Date(article.publishedAt) >= windowStart,
+  );
+}
