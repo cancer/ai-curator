@@ -28,27 +28,33 @@ describe("parseAuthorFeed", () => {
     );
   });
 
-  it("maps description to feedSummary and parses all items", async () => {
+  it("maps description to feedSummary as plain text (no HTML tags) and parses all items", async () => {
     const articles = await parseAuthorFeed(mediumAuthorFeedXml, "madeup");
     expect(articles).toHaveLength(2);
-    expect(articles[0].feedSummary).toContain("made-up summary");
+    expect(articles[0].feedSummary).toBe(
+      "A short made-up summary about a cache that refuses to cooperate.",
+    );
+    expect(articles[0].feedSummary).not.toMatch(/<[^>]+>/);
   });
 });
 
 describe("parseTagFeed", () => {
-  it("produces no body for tag feed items", () => {
-    const articles = parseTagFeed(mediumTagFeedXml, "madeuptag");
+  it("produces no body for tag feed items", async () => {
+    const articles = await parseTagFeed(mediumTagFeedXml, "madeuptag");
     expect(articles[0].body).toBeUndefined();
   });
 
-  it("sets source to medium:tag/{tag}", () => {
-    const articles = parseTagFeed(mediumTagFeedXml, "madeuptag");
+  it("sets source to medium:tag/{tag}", async () => {
+    const articles = await parseTagFeed(mediumTagFeedXml, "madeuptag");
     expect(articles[0].source).toBe("medium:tag/madeuptag");
   });
 
-  it("maps description to feedSummary, converts pubDate, and normalizes url", () => {
-    const [article] = parseTagFeed(mediumTagFeedXml, "madeuptag");
-    expect(article.feedSummary).toContain("fabricated snippet");
+  it("maps description to feedSummary as plain text, converts pubDate, and normalizes url", async () => {
+    const [article] = await parseTagFeed(mediumTagFeedXml, "madeuptag");
+    expect(article.feedSummary).toBe(
+      "A fabricated snippet describing lessons from an outage that never happened.",
+    );
+    expect(article.feedSummary).not.toMatch(/<[^>]+>/);
     expect(article.publishedAt).toBe("2025-07-06T18:45:00.000Z");
     expect(article.url).toBe("https://medium.com/@someone/fake-outage-aabbccdd");
   });

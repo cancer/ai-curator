@@ -32,13 +32,19 @@ function items(xml: string): RssItem[] {
   return ensureArray<RssItem>(parsed?.rss?.channel?.item);
 }
 
-function commonFields(item: RssItem, source: string): NormalizedArticle {
+async function commonFields(
+  item: RssItem,
+  source: string,
+): Promise<NormalizedArticle> {
   return {
     url: normalizeUrl(String(item.link)),
     title: String(item.title),
     source,
     publishedAt: new Date(String(item.pubDate)).toISOString(),
-    feedSummary: item.description,
+    feedSummary:
+      item.description === undefined
+        ? undefined
+        : await htmlToText(item.description),
   };
 }
 
@@ -51,16 +57,19 @@ export async function parseAuthorFeed(
     items(xml).map(async (item) => {
       const encoded = item["content:encoded"];
       return {
-        ...commonFields(item, source),
+        ...(await commonFields(item, source)),
         body: encoded === undefined ? undefined : await htmlToText(encoded),
       };
     }),
   );
 }
 
-export function parseTagFeed(xml: string, tag: string): NormalizedArticle[] {
+export function parseTagFeed(
+  xml: string,
+  tag: string,
+): Promise<NormalizedArticle[]> {
   const source = `medium:tag/${tag}`;
-  return items(xml).map((item) => commonFields(item, source));
+  return Promise.all(items(xml).map((item) => commonFields(item, source)));
 }
 
 export async function fetchAuthorFeed(
