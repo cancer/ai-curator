@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { parseFeed, extractArticleBody } from "./fowler";
+import { describe, it, expect, vi } from "vitest";
+import { parseFeed, extractArticleBody, fetchFowlerFeed } from "./fowler";
 import { fowlerFeedXml } from "../../test/fixtures/fowler-feed";
 import {
   fowlerArticleHtml,
@@ -52,5 +52,35 @@ describe("extractArticleBody", () => {
 
   it("throws when <main> is missing (site structure change detection)", async () => {
     await expect(extractArticleBody(fowlerArticleWithoutMain)).rejects.toThrow();
+  });
+});
+
+describe("fetchFowlerFeed", () => {
+  it("fetches only the feed (no per-article body fetch) and never sets body", async () => {
+    const fetch = vi.fn(
+      async (_url: RequestInfo | URL) =>
+        new Response(fowlerFeedXml, { status: 200 }),
+    );
+
+    const articles = await fetchFowlerFeed({ fetch });
+
+    // The feed is fetched exactly once; article pages are not fetched.
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toBe("https://martinfowler.com/feed.atom");
+    expect(articles).toHaveLength(2);
+    expect(articles[0].feedSummary).toBe(
+      "A fictional introduction to a pattern that does not exist.",
+    );
+    for (const article of articles) {
+      expect(article.body).toBeUndefined();
+    }
+  });
+
+  it("returns [] on a non-ok feed response", async () => {
+    // 4xx returns immediately from fetchWithRetry (no backoff sleeps).
+    const fetch = vi.fn(async (_url: RequestInfo | URL) =>
+      new Response("nope", { status: 404 }),
+    );
+    expect(await fetchFowlerFeed({ fetch })).toEqual([]);
   });
 });

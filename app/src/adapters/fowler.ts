@@ -106,6 +106,26 @@ export async function fetchArticleBody(
   return extractArticleBody(await res.text());
 }
 
+/**
+ * feed のみを取得する（記事本文は取得しない）。Cron A 用。
+ * feedSummary は埋まるが body は付かない。本文取得は Cron B が
+ * fetchArticleBody で上位のみ行う。
+ */
+export async function fetchFowlerFeed(
+  options?: FetchWithRetryOptions,
+): Promise<NormalizedArticle[]> {
+  const res = await fetchWithRetry(
+    "https://martinfowler.com/feed.atom",
+    { headers: { "user-agent": USER_AGENT } },
+    options,
+  );
+  if (!res.ok) {
+    console.warn(`fowler: feed returned ${res.status}; skipping`);
+    return [];
+  }
+  return parseFeed(await res.text());
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**

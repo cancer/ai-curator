@@ -7,6 +7,8 @@
  * 各パイプラインの実装は後続タスクで配線する。
  */
 
+import { runFetchPipeline } from "./pipeline/fetch";
+
 /** バインディング。後続タスクは `import type { Env } from "./index"` で参照する。 */
 export interface Env {
   AI: Ai;
@@ -20,10 +22,10 @@ const CRON_FETCH = "0 */3 * * *";
 const CRON_BUILD_FEED = "0 21 * * *";
 
 export default {
-  async scheduled(controller, _env, _ctx) {
+  async scheduled(controller, env, _ctx) {
     switch (controller.cron) {
       case CRON_FETCH:
-        // TODO: task 6 — fetch パイプラインを配線する
+        await runFetchPipeline(env);
         return;
       case CRON_BUILD_FEED:
         // TODO: task 8 — feed builder を配線する
