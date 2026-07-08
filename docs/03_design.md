@@ -10,25 +10,24 @@
 既存スタック（Cloudflare Workers + Cron Triggers + Queues + D1 + Workers AI）を流用する (BS L19)。
 
 ```
-┌─ Cron A（高頻度）──────────────────────────────┐
-│  Fetch Worker                                   │
+┌─ 日次パス（Cron 1本・1日1回）───────────────────┐
+│  Daily Worker                                   │
 │    Source Adapter (GitHub/HN/Medium/Fowler)     │
-│    → Normalize → SimHash Dedup → D1 (articles)  │
-└─────────────────────────────────────────────────┘
-┌─ Cron B（1日1回）──────────────────────────────┐
-│  Feed Builder Worker                            │
-│    D1 未処理記事 → Workers AI Embedding         │
+│      当日分を全件取得（ページング）              │
+│    → Normalize → SimHash Dedup → D1 (articles メタ) │
+│    → Workers AI Embedding（title+フィード提供テキスト）│
 │    → 意味的 Dedup → Score（全件をスコア順に保持）│
-│    → 傾向サマリ + LLM 要約 → D1 (feed)          │
+│    → 全件本文取得 → 全件 LLM 要約 + 傾向サマリ   │
+│    → D1 (feed)。原文テキストは破棄、派生物のみ保存 │
 └─────────────────────────────────────────────────┘
 ┌─ 閲覧 ─────────────────────────────────────────┐
-│  Viewer（Cloudflare Access で保護）             │
+│  Viewer（Cloudflare Access で保護、fetch ハンドラ）│
 │    ランク付きフィード表示・もっと見る → D1      │
 └─────────────────────────────────────────────────┘
 ```
 
-- Cron 2 系統分離は確定事項 (BS L106)
-- Queues は Fetch のソース間分散・リトライに使う【たたき台】。PoC では不要（後述 §6）
+- **単一 Worker・Cron 1本（1日1回）に統合**（2026-07-09 改定。従来の Cron 2 系統分離 (BS L106) は廃止）。取得〜要約を 1 パスで行い、原文テキストを保存しないため中間状態を持たずメモリで使い回す
+- Queues は使わない（直列 fetch）。将来のソース分散は v2 で判断（後述 §6）
 
 ## 2. コンポーネント設計
 
@@ -54,18 +53,19 @@ RawItem を仕様 §3 の共通スキーマに変換する。URL 正規化（ト
 
 仕様 §6 のスコア式を実装。関心軸ベクトルは D1 に保存し、`max(cosine)` とヒット軸を記録する (BS L42-47)。
 
-### 2.5 Feed Builder
+### 2.5 Feed Builder（日次パスの後半）
 
-1 日 1 回 (BS L106) フィード（仕様 §8）を組む:
+1 日 1 回、同一パス内でフィード（仕様 §8）を組む:
 
 1. **当日傾向サマリ**（§8.1）: Scorer が出したヒット軸分布・意味的 Dedup のクラスタを軸ごとに集計し、LLM で軸別に叙述する。集計は既存のスコアリング成果物を再利用するため追加の Embedding は不要
 2. **ランク付き記事リスト**（§8.2）: 当日母集団をスコア降順で全件保持。hard cut しない
+3. **全件要約**: フィードに載る全記事の本文を取得（Medium=content:encoded / GitHub=release note / Fowler=記事ページ `<main>` / HN=リンク先を粗抽出）して LLM 要約を生成し、feed_entries.summary に保存する。取得失敗はスニペット→タイトルにフォールバックし、1 件の失敗で全体を止めない。本文は要約後に破棄する
 
-LLM は Workers AI を使用（確定 2026-07-06）。PoC 実測（`docs/poc_results.md` ④）で llama-3.2-3b の日本語品質が不十分と判明したため、実運用前に日本語品質の高い生成モデルへ再選定する。LLM 要約の生成範囲（上位先行 / 全件 / 開いた時のみ）は未確定（FR-7 の論点）。「開いた時のみ」を採る場合、本文非保存 (NFR-2) のため Viewer から本文再 fetch する経路が要る。
+LLM は Workers AI を使用（確定 2026-07-06）。PoC 実測（`docs/poc_results.md` ④）で llama-3.2-3b の日本語品質が不十分と判明したため、実運用前に日本語品質の高い生成モデルへ再選定する。**LLM 要約は全件生成に確定**（2026-07-09。コストが制約でないため体験優先）。
 
 ### 2.6 Viewer
 
-ランク付きフィードを表示する非公開ページ。Cloudflare Access で認証 (BS L78)。スコア順に並べ「もっと見る」で下位をページング読み込みする。LLM 要約を「開いた時のみ生成」する場合は、記事を開いた時点で本文を再 fetch → 要約する処理を持つ（本文は保存しない）。配信フォーマット細部は未確定 (BS L115)。
+ランク付きフィードを表示する非公開ページ（fetch ハンドラ）。Cloudflare Access で認証 (BS L78)。スコア順に並べ「もっと見る」で下位をページング読み込みする。要約は日次パスで全件生成済み（feed_entries.summary）なので、Viewer は保存済み要約を表示するだけ（本文再 fetch はしない）。配信フォーマット細部は未確定 (BS L115)。
 
 ## 3. データ設計【たたき台】
 
@@ -79,8 +79,8 @@ CREATE TABLE articles (
   title         TEXT NOT NULL,
   source        TEXT NOT NULL,
   published_at  TEXT NOT NULL,
-  feed_summary  TEXT,
-  content_hash  TEXT,                   -- SimHash
+  -- feed_summary は持たない（原文由来のため非永続。2026-07-09 改定）
+  content_hash  TEXT,                   -- SimHash（title+フィード提供テキスト）
   embedding     TEXT,                   -- JSON 配列【暫定。実運用で Vectorize 移行、BS L112】
   embedding_model TEXT,                 -- ベクトル生成モデル名（異モデル間は比較不能のため必須併記 — §4）
   score         REAL,
@@ -103,7 +103,7 @@ CREATE TABLE feed_entries (
   date        TEXT NOT NULL,            -- フィード生成日
   article_id  INTEGER NOT NULL REFERENCES articles(id),
   rank        INTEGER NOT NULL,         -- スコア降順の順位（もっと見る式ページングの並び）
-  summary     TEXT,                     -- 自前生成の要約（保存可 BS L75）。生成範囲は FR-7 論点、未生成は NULL
+  summary     TEXT,                     -- 自前生成の要約（保存可 BS L75）。全件生成（2026-07-09 確定）。取得失敗時のみ NULL
   UNIQUE(date, article_id)
 );
 
@@ -137,7 +137,7 @@ PoC の検証項目③（スコア順の目視評価）で両者を A/B 比較�
 
 ## 5. コスト設計
 
-- 段階絞り込みが原則: SimHash（無料）→ Embedding（安価）→ LLM（1 日 1 回・少数のみ）(BS L17-18)
+- 段階絞り込み: SimHash（無料・保存前）→ Embedding（安価・全件）→ LLM 要約（1 日 1 回・全件）(BS L17-18)。要約を全件に広げてもコストは無料枠の 1% 未満（実測）で制約にならない
 - Workers AI は無料枠 10,000 Neurons/日。`bge-m3` は 1,075 neurons/M input tokens のため、Embedding は無料枠内に収まる見込み
   （https://developers.cloudflare.com/workers-ai/platform/pricing/）
 - 実測は PoC の検証項目④ (BS L92)
@@ -147,7 +147,7 @@ PoC の検証項目③（スコア順の目視評価）で両者を A/B 比較�
 | フェーズ | 構成 |
 |---|---|
 | PoC | ローカルスクリプト + Workers AI API。Workers/Queues/Cron は使わない（`docs/04_poc_plan.md`） |
-| 実運用 v1 | Workers + Cron 2 系統 + D1。Queues なしの直列 fetch から開始【たたき台】 |
+| 実運用 v1 | Workers + Cron 1 本（日次単一パス）+ D1。Queues なしの直列 fetch（2026-07-09 改定：2 系統分離を廃止） |
 | 実運用 v2 | Queues によるソース分散、Vectorize 移行、フィードバック還流・明示ルール (BS L38-39, L112) |
 
 ### 6.1 設定データの扱い（確定 2026-07-07 ユーザー方針）
