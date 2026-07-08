@@ -8,6 +8,7 @@
  */
 
 import { runFetchPipeline } from "./pipeline/fetch";
+import { runFeedBuilder } from "./pipeline/feed";
 
 /** バインディング。後続タスクは `import type { Env } from "./index"` で参照する。 */
 export interface Env {
@@ -28,7 +29,7 @@ export default {
         await runFetchPipeline(env);
         return;
       case CRON_BUILD_FEED:
-        // TODO: task 8 — feed builder を配線する
+        await runFeedBuilder(env);
         return;
     }
   },
