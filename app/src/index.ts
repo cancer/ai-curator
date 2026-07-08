@@ -9,6 +9,9 @@
 
 import { runFetchPipeline } from "./pipeline/fetch";
 import { runFeedBuilder } from "./pipeline/feed";
+import { renderFeedPage } from "./viewer/index";
+import { renderSettingsForm, handleSettingsUpdate } from "./viewer/settings";
+import { handleClickRedirect, handleFeedbackApi } from "./viewer/feedback";
 
 /** バインディング。後続タスクは `import type { Env } from "./index"` で参照する。 */
 export interface Env {
@@ -34,10 +37,28 @@ export default {
     }
   },
 
-  async fetch(_request, _env, _ctx) {
-    // TODO: task 9 — Viewer(閲覧・設定画面・フィードバック収集)を実装する
-    return new Response("ai-curator: ok", {
-      headers: { "content-type": "text/plain; charset=utf-8" },
-    });
+  async fetch(request, env, _ctx) {
+    const url = new URL(request.url);
+    const { pathname } = url;
+    const { method } = request;
+
+    if (method === "GET" && pathname === "/") {
+      const page = Number(url.searchParams.get("page") ?? "1");
+      return renderFeedPage(env, page);
+    }
+    if (method === "GET" && pathname === "/settings") {
+      return renderSettingsForm(env);
+    }
+    if (method === "POST" && pathname === "/settings") {
+      return handleSettingsUpdate(env, request);
+    }
+    if (method === "GET" && pathname.startsWith("/r/")) {
+      return handleClickRedirect(env, pathname.slice("/r/".length));
+    }
+    if (method === "POST" && pathname === "/api/feedback") {
+      return handleFeedbackApi(env, request);
+    }
+
+    return new Response("Not Found", { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
