@@ -18,23 +18,23 @@
 | フィードバック | **収集（クリック記録・👍/👎）は v1 に含める**。学習（プロファイル還流）は v2 | FR-5（2026-07-08 更新）。収集しないと v2 学習の開始時データがゼロになる。明示ルール（ドメイン填/除外）は v2 のまま |
 | 設定管理 UI | **v1 に含める**（ソース・関心軸の Web 編集画面） | FR-8（2026-07-08 追加）。マルチデバイス利用のため CLI 前提では成り立たない |
 | Worker 構成 | **単一 Worker**（cron 1 本〔日次〕 + fetch ハンドラ）（2026-07-09 改定） | 取得〜要約を 1 パスに統合。2 系統分離は廃止（原文非保存でメモリ使い回しできるため中間状態が不要） |
-| digest LLM モデル | config（KV）で切替可能にし、初期値は実装時に選定（タスク 8 参照） | PoC で llama-3.2-3b の日本語品質が不十分と実測済み |
+| digest LLM モデル | `config.ts` の `SYSTEM_CONFIG.digest.model` にコード固定（2026-07-09 改定。v1 は UI 非公開・変更はコード編集）。初期値は運用前に選定 | PoC で llama-3.2-3b の日本語品質が不十分と実測済み。KV には保存しない |
 
 ## 2. 前提知識: PoC の実測で判明した事実（実装に必ず織り込む）
 
 PoC コードを見ずに実装するために、以下をすべて本書の該当タスクに反映してある。背景として通読すること。
 
-1. **Medium の記事ページは直接 fetch できない**（Cloudflare ボットチャレンジで "Just a moment..." が返る）。本文は著者 feed の `content:encoded` から取る。タグ feed は snippet のみで本文なし
-2. **martinfowler.com の記事ページは UA を付ければ取得できる**。本文コンテナは `<main>`。ボイラープレート（タイトル h1・日付・著者・タグ・目次）が混入するため除去する
+1. **フィードによっては本文全文が feed 内に入っている**（例: Medium 著者 feed は `content:encoded`、martinfowler.com の Atom は `content` に本文 HTML を含む）。汎用フィードは feed 内の本文（`content:encoded`/`content`/`description`）を優先して使い、記事ページの fetch を避ける。**Medium の記事ページはそもそも直接 fetch できない**（Cloudflare ボットチャレンジで "Just a moment..." が返る）ため、feed 内本文が無い場合のリンク先取得は失敗しうる（→ スニペット→タイトルにフォールバック）
+2. **feed 内本文にはボイラープレートが混じることがある**（タイトル・日付・著者・タグ・目次など）が、要件 FR-2 のとおりノイズは Embedding 時に関連度が低く埋もれるため、汎用フィードは粗いタグ除去（root/exclude を指定しない HTML→テキスト）で足りる。かつての Fowler 専用の `<main>` 抽出＋除外セレクタ列は不要になった（廃止）
 3. **HTMLRewriter には癖が 3 つある**（タスク 4 に対処を明記）
-4. **fast-xml-parser は既定のエンティティ展開上限 1000 で本文入り feed の parse に失敗する**（Fowler の Atom はエスケープ済み HTML を含みエンティティが 3000 個超）
+4. **fast-xml-parser は既定のエンティティ展開上限 1000 で本文入り feed の parse に失敗する**（本文 HTML をエスケープして含む feed はエンティティが数千個に達する）
 5. **bge-m3 は 1 シーケンス 8,192 トークンが実効上限**（"Sequence too long" エラー。料金ページの context window 60,000 は 1 リクエスト合計の上限で別物）。**複数記事のバッチ Embedding は上限超過で失敗する**ため 1 記事 1 リクエストとする
 6. **技術系テキストのトークン数は文字数からの見積りを大きく上回る**（実測: 短いタイトル 50 件で見積 807 → 実測 11,150 トークン、約 14 倍）。文字数ベースの切り詰めは保守的に（2.5 chars/token 換算）
 7. **外部 fetch は間欠的に失敗する**（GitHub API で `Malformed_HTTP_Response` を複数回観測）。すべての外部 fetch にリトライを入れる
 8. **Embedding モデルはランキングをモデル間で大きく変える**（bge-m3 と qwen3 で上位 10 の一致が 3〜4/10）。モデル入替は全記事の再 Embedding を意味し、本文非保存のため再 fetch 頼みになる。**ベクトルには必ず生成モデル名を併記**する
 9. **コストは制約にならない**（PoC 実測の桁感: Embedding 1 記事 ~数 neurons、LLM 要約 1 件 ~5 neurons［小型モデル］）。全件要約でも neurons は記事件数に比例するだけで、個人規模なら無料枠 10,000 neurons/日に対し十分小さい。正確な値はモデルと記事件数が決まってから見積もる（総量は予測せず運用実測で確認）
 10. **llama-3.2-3b-instruct の日本語要約は品質不十分**（中国語混入・カタカナ誤り・未翻訳残り）。日本語品質でモデルを選び直す
-11. **本文取得は失敗しうる**（Medium タグ feed はスニペットのみ、HN のリンク先外部ページは SPA・ペイウォール・ボットブロック等で取得できないことがある）。全件要約では全記事の本文取得を試みるが、**取得失敗時はスニペット→タイトルの順でフォールバック**し、1 件の失敗で日次パス全体を止めない
+11. **本文取得は失敗しうる**（`description` のみで本文を持たないフィード、HN やフィードのリンク先外部ページが SPA・ペイウォール・ボットブロック等で取得できないことがある）。全件要約では全記事の本文取得を試みるが、**取得失敗時はスニペット→タイトルの順でフォールバック**し、1 件の失敗で日次パス全体を止めない
 12. **法務原則**: 他者の著作物の完全複製を保存しない。記事本文は処理中のみメモリで扱い、DB・ログ・テスト fixture のどこにも書かない。テスト fixture は完全に架空の合成データを自作する（実記事のコピペ禁止）
 
 ## 3. 全体構成
@@ -51,7 +51,7 @@ app/
     index.ts              # entrypoint: scheduled(cron 分岐) + fetch(Viewer)
     config.ts             # KV から設定をロード・検証
     lib/                  # 共通ユーティリティ（タスク 4）
-    adapters/             # ソースアダプタ ×4（タスク 5）
+    adapters/             # ソースアダプタ（汎用フィード + GitHub + HN。タスク 5）
     pipeline/             # fetch 系・feed 系のパイプライン（タスク 6, 8）
     viewer/               # フィード表示（タスク 9）
   test/
@@ -71,9 +71,9 @@ app/
 | 2 | D1 スキーマ | migrations 作成・適用 | #1 |
 | 3 | KV 設定ロード | 関心軸・監視対象・パラメータの外部化 | #1 |
 | 4 | 共通ユーティリティ | URL 正規化 / retry / htmlToText / XML parse | #1 |
-| 5 | ソースアダプタ ×4 | GitHub / HN / Medium / Fowler | #4 |
+| 5 | ソースアダプタ | 汎用フィード（RSS/Atom）+ GitHub + HN | #4 |
 | 6 | 取得パイプライン（日次パス前半） | 全件取得・SimHash Dedup + D1 保存（メタ） | #2 #3 #5 |
-| 7 | Embedding クライアント | Workers AI bge-m3 呼び出しと制約対応 | #1 |
+| 7 | Embedding クライアント + 関心軸同期 | Workers AI bge-m3 呼び出しと制約対応 / ラベル→LLM 記述文→Embedding の軸同期（日次パスで統合） | #1 |
 | 8 | Feed Builder（日次パス後半） | Embedding・意味的 Dedup・スコアリング・全件要約・傾向サマリ | #2 #3 #6 #7 |
 | 9 | Viewer | ランク付きフィード + もっと見る + 傾向表示 | #8 |
 | 10 | デプロイ・Access 設定・運用確認 | 本番投入手順 | #9 |
@@ -104,7 +104,7 @@ CREATE TABLE articles (
   id            INTEGER PRIMARY KEY,
   url           TEXT NOT NULL UNIQUE,   -- 冪等キー = 正規化済み URL
   title         TEXT NOT NULL,
-  source        TEXT NOT NULL,          -- 例: github:owner/repo, hn, medium:@author, medium:tag/x, fowler
+  source        TEXT NOT NULL,          -- 例: feed:{フィードURL}, github:owner/repo, hn
   published_at  TEXT NOT NULL,          -- ISO 8601
   -- feed_summary 列は持たない（原文由来のため非永続。2026-07-09 改定）
   content_hash  TEXT,                   -- SimHash（16進文字列。title+フィード提供テキストから算出）
@@ -119,9 +119,9 @@ CREATE INDEX idx_articles_created ON articles(created_at);
 CREATE TABLE interest_axes (
   id         INTEGER PRIMARY KEY,
   axis_id    TEXT NOT NULL UNIQUE,      -- 例: web-fw, ai, agentic-coding, software-design
-  label      TEXT NOT NULL,             -- 表示名（例: Web FW）
-  seed_hash  TEXT NOT NULL,             -- seedText の SHA-256。設定変更の検知用（タスク 7）
-  embedding  TEXT NOT NULL,             -- JSON 数値配列
+  label      TEXT NOT NULL,             -- ユーザー入力のトピックラベル（日本語可。例: Web フレームワーク）
+  label_hash TEXT NOT NULL,             -- label の SHA-256。設定変更の検知用（タスク 7）
+  embedding  TEXT NOT NULL,             -- JSON 数値配列（label→LLM 記述文→Embedding で生成）
   embedding_model TEXT NOT NULL,
   updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -171,18 +171,19 @@ CREATE TABLE feed_trends (
 ```jsonc
 {
   "interestAxes": [
-    { "id": "web-fw", "label": "Web FW", "seedText": "<英語の関心記述文>" }
-    // ai / agentic-coding / software-design も同形
+    { "id": "web-fw", "label": "Web フレームワーク" }
+    // ラベルは自然言語（日本語可）。軸ベクトルは日次パスの軸同期で
+    // ラベル→LLM 記述文→Embedding により自動生成する（seedText 手書きは廃止）
   ],
   "sources": {
+    "feeds": ["https://martinfowler.com/feed.atom", "https://medium.com/feed/@author"],
     "githubRepos": ["owner/repo", "..."],
-    "hnMinPoints": 50,
-    "mediumAuthorFeeds": ["@author"],
-    "mediumTagFeeds": ["tag-name"],
-    "fowlerFeed": true
+    "hnMinPoints": 50
   }
 }
 ```
+
+（`feeds` は任意の RSS/Atom フィード URL のリスト。Medium・martinfowler.com もここに URL として並べる。旧 `mediumAuthorFeeds`/`mediumTagFeeds`/`fowlerFeed` は `feeds` に統合し廃止。2026-07-09 改定）
 
   - system パラメータはコード定数 `SYSTEM_CONFIG`（`scoring` / `embedding` / `digest`）に固定。
     `digest.model` は運用前にコードで選定値へ差し替える前提の暫定既定（`llama-3.2-3b` は使わない）。
@@ -228,13 +229,13 @@ CREATE TABLE feed_trends (
 **(d) XML パーサ設定 `feedParserOptions`**
   - fast-xml-parser を使う。**既定のエンティティ展開上限（maxTotalExpansions=1000）では本文入り feed の parse に失敗する**（前提知識 4）
   - フラットな展開回数上限のみ引き上げ（例: 100,000）、再帰深さ制限（billion-laughs 対策）は既定の厳しい値のまま残す
-  - Medium 著者 feed と Fowler Atom の両方でこの設定を使う
+  - 本文 HTML をエスケープして含む汎用フィード（Medium 著者 feed・martinfowler.com の Atom など）の parse でこの設定を使う
 
 - **テスト**: (a)〜(d) すべてユニットテスト必須。エッジケース（不正 URL、リトライ枯渇、void 要素の誤用検知は不可な旨、エンティティ 3000 個超の合成 XML）を含める
 
-### タスク 5: ソースアダプタ ×4
+### タスク 5: ソースアダプタ（汎用フィード + GitHub + HN）
 
-- **対象**: `app/src/adapters/github.ts` `hn.ts` `medium.ts` `fowler.ts` と `app/src/adapters/types.ts`
+- **対象**: `app/src/adapters/feed.ts`（汎用 RSS/Atom）`github.ts` `hn.ts` と `app/src/adapters/types.ts`
 - **共通インターフェース**:
 
 ```ts
@@ -248,29 +249,30 @@ interface NormalizedArticle {
 }
 ```
 
-**(a) GitHub Releases**
+**(a) 汎用フィード（RSS/Atom・主軸）**
+  - 入力は `config.sources.feeds`（任意のフィード URL リスト）。各 URL を fetch し、タスク 4(d) の `feedParserOptions` で parse する。RSS（`<item>`）と Atom（`<entry>`）の両形式を扱う
+  - item/entry ごとに抽出:
+    - `url`: RSS は `<link>` テキスト、Atom は `<link rel="alternate">` の `href`。**normalizeUrl 必須**（Medium は `?source=rss------...` が付くため、正規化しないと同一記事が重複する）
+    - `title`: `<title>`
+    - `publishedAt`: RSS `pubDate`（RFC 2822 → `new Date(...).toISOString()`）/ Atom `published`（無ければ `updated`。ISO 8601）
+    - `feedSummary`: RSS `description` / Atom `summary` を htmlToText。**無ければ本文（下記 body）の先頭を流用**して埋める（Embedding 入力が title のみに退化しないように。前提: Embedding は title + feedSummary — タスク 8）
+    - `body`（要約用の一時データ）: **`content:encoded`（RSS）→ `content`（Atom）→ `description` の優先順**で feed 内本文を取り、htmlToText でテキスト化。いずれも無ければ body は空のままにし、要約段（タスク 8）でリンク先取得を試みる
+    - `source`: `feed:{フィードURL}`
+  - **記事ページの直接 fetch はアダプタでは行わない**。本文が feed 内に無い場合のリンク先取得は要約段（タスク 8）で行う（任意サイトはボットチャレンジ・SPA・ペイウォール等で失敗しうるため、粗いタグ除去＋フォールバックで扱う。前提知識 1・2・11）
+  - **当日ウィンドウ内の item を全件対象**にする（フィードの返す範囲で `publishedAt` が当日ウィンドウ内のものを採る）
+  - Medium・martinfowler.com も専用扱いせず、この汎用アダプタでフィード URL として処理する（Medium 著者 feed は `content:encoded`、Fowler Atom は `content` に本文が入るため、いずれも feed 内本文で足りる）
+
+**(b) GitHub Releases**
   - `GET https://api.github.com/repos/{owner}/{repo}/releases?per_page=100&page=N`、ヘッダ `user-agent` 必須（無いと 403）。**当日ウィンドウ内のリリースを全件取得**（`published_at` が当日ウィンドウを下回るページに達するまで `page` を進める。先頭 10 件で打ち切らない）
-  - `draft: true` と `prerelease: true` は除外。`title = name ?? tag_name`、`body` = release note（markdown のまま可）、`publishedAt = published_at`
+  - `draft: true` と `prerelease: true` は除外。`title = name ?? tag_name`、`body` = release note（markdown のまま可）、`publishedAt = published_at`、`source = github:owner/repo`
   - 未認証はレート制限 60 req/h/IP。日次 1 回 × リポジトリ数 × ページング分の呼び出しになるため、リポジトリが多い場合は制限に触れうる。429/403 with rate-limit はリトライ対象外として警告ログを出し、そのソースはスキップして続行する
 
-**(b) Hacker News（Algolia API）**
+**(c) Hacker News（Algolia API）**
   - `GET https://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=points%3E{minPoints},created_at_i%3E{当日ウィンドウ下限}&hitsPerPage=...&page=...` で**当日ウィンドウ内を全ページ取得**（`nbPages` まで `page` を進める。先頭 30 件で打ち切らない）
-  - `url` が null の self-post は `https://news.ycombinator.com/item?id={objectID}` にフォールバック。`story_text` があれば htmlToText して feedSummary に
-  - キーワード事前フィルタはしない（絞り込みは Scorer の仕事）。**リンク先の外部ページを取得し、粗いタグ除去（root/exclude なしの htmlToText）で本文化する**（2026-07-09 改定）。任意サイト向けの個別抽出は書かない。取得失敗（SPA・ペイウォール・非 HTML・ボットブロック等）や本文が空/極端に短い場合は story_text→タイトルにフォールバック。この本文取得は要約用で、日次パスの要約段で行う
+  - `url` が null の self-post は `https://news.ycombinator.com/item?id={objectID}` にフォールバック。`story_text` があれば htmlToText して feedSummary に。`source = hn`
+  - キーワード事前フィルタはしない（絞り込みは Scorer の仕事）。**リンク先の外部ページを取得し、粗いタグ除去（root/exclude なしの htmlToText）で本文化する**。任意サイト向けの個別抽出は書かない。取得失敗（SPA・ペイウォール・非 HTML・ボットブロック等）や本文が空/極端に短い場合は story_text→タイトルにフォールバック。この本文取得は要約用で、日次パスの要約段で行う
 
-**(c) Medium（RSS）**
-  - 著者 feed `https://medium.com/feed/{@author}`: `<item>` の `content:encoded` に**本文全文が入っている**。htmlToText でテキスト化して body に。`description` → feedSummary
-  - タグ feed `https://medium.com/feed/tag/{tag}`: `description` の snippet のみ（body なし）
-  - **記事ページの直接 fetch は実装しない**（ボットチャレンジで不可能。前提知識 1）
-  - pubDate は RFC 2822 形式なので `new Date(pubDate).toISOString()` で変換
-
-**(d) martinfowler.com**
-  - feed: `https://martinfowler.com/feed.atom`（Atom）。entry の `link@href` / `title` / `updated` / `content`（HTML → htmlToText で feedSummary に）
-  - 記事本文: 記事 URL を fetch（`user-agent` 付与、**連続アクセスは 1 秒以上間隔を空ける**）し、`htmlToText(html, { root: "main", exclude: ["h1", ".date", ".author-list", ".author", ".tags", ".contents"] })` で抽出
-    - この除外セレクタは PoC で実測確認済み（タイトル・日付・著者略歴・目次を除去し本文本体だけが残る。サイト内の「論文」「Fragments」両テンプレートで動作確認済み）
-  - `<main>` が見つからないページは throw（サイト構造変更の検知。黙って空文字を返さない）
-
-- **テスト**: 各アダプタの parse 関数を fixture でテストする。**fixture は完全に架空の合成データを自作する**（実在記事・実在 feed のコピペは禁止。前提知識 12）。形式（フィールド名・ネスト構造・CDATA・エスケープ済み HTML）だけ本物を模し、文章・URL・著者名はすべて架空にする
+- **テスト**: 各アダプタの parse 関数を fixture でテストする。**fixture は完全に架空の合成データを自作する**（実在記事・実在 feed のコピペは禁止。前提知識 12）。形式（フィールド名・ネスト構造・CDATA・エスケープ済み HTML）だけ本物を模し、文章・URL・著者名はすべて架空にする。汎用フィードは RSS（`content:encoded` あり/なし）と Atom（`content` あり/なし）の両方、および `description` のみのケースを網羅する
 
 ### タスク 6: 取得パイプライン（日次パス前半）
 
@@ -279,7 +281,7 @@ interface NormalizedArticle {
   - 流れ: 全ソースを順に fetch（直列でよい）→ normalize → SimHash 計算 → D1 保存
   - **SimHash**: 64bit。入力は `title + " " + (feedSummary ?? "")`（本文は使わない — 保存対象と揃え、本文有無でハッシュが変わらないように）。トークン分割は空白 + 記号区切りの単純な word 分割で足りる。ハミング距離 3 以下を重複とみなし、**直近 7 日の articles の content_hash と比較**して重複は insert しない
   - D1 保存: `INSERT INTO articles (url, title, source, published_at, content_hash) VALUES (...) ON CONFLICT(url) DO NOTHING`（冪等キー = 正規化 URL。再実行・重複 fetch に安全）。**feed_summary は列ごと廃止したので保存しない**
-  - フィード提供テキスト・body はこの段では保存しない。フィード提供テキストは SimHash と（後続段の）Embedding 入力に使うため、同一日次パス内でメモリに保持して使い回す。本文（Fowler 記事ページ・HN リンク先など）は後半の全件要約段で取得する
+  - フィード提供テキスト・body はこの段では保存しない。フィード提供テキストは SimHash と（後続段の）Embedding 入力に使うため、同一日次パス内でメモリに保持して使い回す。feed 内に本文が無い記事（`description` のみのフィード・HN リンク先など）の本文は、後半の全件要約段でリンク先を取得する
   - 1 ソースの失敗で全体を止めない: ソース単位で try/catch し、失敗ソースはログに残して続行。全ソース失敗時のみ throw（cron 失敗として observability に出す）
 - **テスト**: SimHash の性質（同一文字列 → 同一ハッシュ / 1 語違い → ハミング距離小 / 無関係文 → 距離大）、ON CONFLICT の冪等性
 
@@ -294,7 +296,11 @@ interface NormalizedArticle {
   - 5xx・例外はタスク 4(b) と同方針でリトライ（AI バインディング呼び出しにも一時エラーがある。PoC 実測）
   - 返り値: `{ vector: number[], inputTokens?: number }`。レスポンスの `meta`（`cost_metric_value_1` = input tokens, `neurons`）があれば記録し、実行サマリのログに合計を出す（コスト監視。ダッシュボードとの突き合わせ用）
   - Embedding を保存する際は **`embedding_model` カラムに必ずモデル名を書く**（前提知識 8）。読み出し時はモデル名が一致するベクトルだけを比較に使う
-- **関心軸ベクトルの同期**: 日次パスの Embedding 段の冒頭で interest_axes を読み、`config.interestAxes` の各軸について次のいずれかに該当したら seedText を Embedding して upsert する: (a) テーブルに未登録 (b) `sha256(seedText) ≠ seed_hash`（設定画面での変更検知） (c) `embedding_model` が config と不一致（モデル入替）。config から消えた軸は行を削除する
+- **関心軸ベクトルの同期**（2026-07-09 改定。ラベルから自動生成）: 日次パスの Embedding 段の冒頭で interest_axes を読み、`config.interestAxes` の各軸について次のいずれかに該当したら軸ベクトルを再生成して upsert する: (a) テーブルに未登録 (b) `sha256(label) ≠ label_hash`（設定画面でのラベル変更検知） (c) `embedding_model` が config と不一致（モデル入替）。config から消えた軸は行を削除する
+  - 再生成の手順: **ラベル → LLM（`config.digest.model`）で関心記述文を生成 → 記事と同一の Embedding モデルでベクトル化**。ユーザーはラベル（日本語可）しか与えないので、埋め込み用の記述文はここで機械生成する。生成記述文は保存不要（埋め込みに使って破棄し、`embedding` / `label_hash` / `embedding_model` のみ保存する）
+  - LLM 呼び出し（記述文生成）: `env.AI.run(config.digest.model, { messages, max_tokens: ... })`。system プロンプト例: 「次のトピックについて、関連記事を検索するための関心記述文を 2〜3 文で書いてください。」 user: ラベル。要約用と同じ生成モデルを使うため、この段でも生成 LLM が要る（Embedding クライアントに加えて `env.AI` のテキスト生成を呼ぶ）
+  - **依存**: この同期関数は Embedding クライアント（本タスク）に加え、config（タスク 3）・interest_axes（タスク 2）・生成 LLM を使うため、日次パス（タスク 8）で各記事 Embedding の前段に組み込む。Embedding クライアント単体（`embedding.ts`）はタスク 1 だけで実装・テストできる
+  - **限界（実装者注意）**: `label_hash` は記述文生成に使う LLM（モデル/プロンプト）の変更までは検知しない。記述文生成の仕様を変えたら、軸テーブルをクリアするかラベルを変えて明示的に再生成すること
 
 ### タスク 8: Feed Builder（日次パス後半）
 
@@ -311,7 +317,7 @@ interface NormalizedArticle {
    - cosine は `dot(a,b) / (|a| × |b|)`。ゼロベクトルは 0 とする
 5. **feed_entries 書き込み**: スコア降順に rank 1..N で当日分を insert（同日再実行に備え、先に当日分を delete）
 6. **全件の要約生成**（フィードに載る全記事）:
-   - 本文の取得: GitHub → release note / Medium 著者 feed → content:encoded / Fowler → 記事ページ `<main>` 抽出 / HN → リンク先を粗いタグ除去で本文化 / Medium タグ feed → スニペットのみ。単一パスなので前段でメモリ保持した本文/テキストがあればそれを使い、無いものだけ取得する
+   - 本文の取得: GitHub → release note / 汎用フィード → feed 内本文（`content:encoded`/`content`/`description`）があればそれ、無ければリンク先を粗いタグ除去（root/exclude なしの htmlToText）で本文化 / HN → リンク先を粗いタグ除去で本文化。単一パスなので前段でメモリ保持した本文/テキストがあればそれを使い、無いものだけ取得する
    - 取得失敗や本文が空/極端に短い場合はスニペット→タイトルの順でフォールバック。**失敗してもループを止めない**（1 件の失敗で全体を失わない。try/catch で件数をログ）
    - LLM 呼び出し: `env.AI.run(config.digest.model, { messages, max_tokens: 300 })`。system プロンプト: 「あなたは技術ニュースの編集者です。与えられた記事のタイトルと本文抜粋から、内容を 2〜3 文の**日本語**で要約してください。誇張や主観的評価を避け、記事の主旨を簡潔に伝えてください。」 user: `タイトル: {title}\n\n本文抜粋:\n{body の先頭 6,000 字}`
    - 生成した要約を feed_entries.summary に保存（自前生成物なので保存可）
@@ -333,9 +339,10 @@ interface NormalizedArticle {
   - **公開経路を作らない**: RSS 出力・共有リンク・SNS 投稿機能を実装しない（要件 FR-7）
 
 **(b) 設定画面（FR-8）**
-  - `GET /settings` : KV の UserConfig（`interestAxes` / `sources`。空なら既定）をフォームで表示。編集対象は (1) 関心軸（label / seedText の編集、軸の追加・削除） (2) ソース（githubRepos / mediumAuthorFeeds / mediumTagFeeds の各リスト、hnMinPoints）。scoring 等の system パラメータは v1 では表示のみ（誤操作防止。変更はコード編集 `SYSTEM_CONFIG` で）
-  - `POST /settings` : バリデーション（axis id 形式、repo が `owner/name` 形式、数値範囲）を通れば `saveConfig` で KV を更新し、303 で `GET /settings` に戻す。エラーは 400 + 入力値保持
-  - seedText を変更した場合、次回の日次パスで関心軸ベクトルが自動再生成される（タスク 7 の seed_hash 検知）。その旨を画面に注記する
+  - `GET /settings` : KV の UserConfig（`interestAxes` / `sources`。空なら既定）をフォームで表示。編集対象は (1) 関心軸（ユーザーが編集するのは**ラベルのみ**、軸の追加・削除。seedText 手書きは廃止） (2) ソース（`feeds`＝フィード URL リスト / `githubRepos` の各リスト、`hnMinPoints`）。scoring 等の system パラメータは v1 では表示のみ（誤操作防止。変更はコード編集 `SYSTEM_CONFIG` で）
+  - **軸 `id` の採番**: `id` は `interest_axes.axis_id` / `articles.hit_axis` / `feed_trends.axis_id` から参照される安定キーなので、ラベルとは独立に軸の**追加時に一度だけ採番**し、以後ラベルを変えても不変とする（ラベルから slug 化しない。ラベル rename で過去の `hit_axis` 行が孤立するのを防ぐ）。ユーザーはラベルだけを編集し、`id` は UI に露出させない（採番方式は未確定。「迷った点」に記載）
+  - `POST /settings` : バリデーション（label 非空、新規軸の `id` が既存と衝突しない、feed URL が http(s) の URL 形式、repo が `owner/name` 形式、数値範囲）を通れば `saveConfig` で KV を更新し、303 で `GET /settings` に戻す。エラーは 400 + 入力値保持
+  - ラベルを変更した場合、次回の日次パスで関心軸ベクトルが自動再生成される（タスク 7 の label_hash 検知。ラベル→LLM 記述文→Embedding）。その旨を画面に注記する
   - フォームは素の HTML `<form method="post">`。JS 必須にしない
 
 **(c) フィードバック収集（FR-5 の収集のみ。学習は v2）**
@@ -343,7 +350,7 @@ interface NormalizedArticle {
   - `POST /api/feedback` : body `{ feed_entry_id, kind: "up" | "down" }` → feedback に insert。フィード画面の 👍/👎 から呼ぶ（最小のインライン JS で fetch、失敗時は無視でよい）
   - v1 では収集のみ。**feedback テーブルを読む処理を実装しない**（学習は v2 スコープ。先回り実装をしない）
 
-- **テスト**: ランク順・ページング境界・要約 NULL 表示 / 設定のバリデーション（不正 repo 形式・空 seedText の拒否、正常系の KV 書き込み） / `/r/` のクリック記録とリダイレクト・存在しない id の 404 / feedback insert
+- **テスト**: ランク順・ページング境界・要約 NULL 表示 / 設定のバリデーション（不正 repo 形式・不正 feed URL・空 label の拒否、正常系の KV 書き込み） / `/r/` のクリック記録とリダイレクト・存在しない id の 404 / feedback insert
 
 ### タスク 10: デプロイ・Access 設定・運用確認
 
@@ -355,13 +362,13 @@ interface NormalizedArticle {
   5. 動作確認: `wrangler dev --test-scheduled` でローカル cron 発火（`curl "http://localhost:8787/__scheduled?cron=0+*/3+*+*+*"` 等）→ 本番は `wrangler tail` でログを見ながら初回 cron を待つ（または dashboard から手動トリガ）
   6. 翌朝: フィード表示・要約品質・Workers AI ダッシュボードの neurons 消費を確認（全件要約なので記事件数に比例。個人規模なら無料枠 10,000/日に十分収まる想定。実測して桁を把握する）
 - **確認チェックリスト**（poc_results の合格基準を流用）:
-  - [ ] 4 ソースすべてから記事が入る（articles にレコード）
+  - [ ] 各ソース（汎用フィード・GitHub・HN）から記事が入る（articles にレコード）
   - [ ] 同一 URL の再 fetch で重複しない
   - [ ] フィード上位がゴミだらけでない・下位に技術外トピックが沈む
   - [ ] 要約が自然な日本語である
   - [ ] articles・feed_entries のどこにも記事本文が保存されていない（SELECT で確認）
   - [ ] 未認証アクセスが Access でブロックされる（`/` `/settings` `/r/1` すべて）
-  - [ ] スマホから設定画面でソース追加・関心軸の seedText 編集ができ、翌日のフィードに反映される
+  - [ ] スマホから設定画面でフィード URL 追加・関心軸ラベル編集ができ、翌日のフィードに反映される
   - [ ] 記事リンクのクリックと 👍/👎 が feedback テーブルに記録される
 
 ## 6. 修正対象ファイル一覧
@@ -373,7 +380,7 @@ interface NormalizedArticle {
 - `app/src/index.ts` — scheduled 分岐 + fetch(Viewer) の entrypoint
 - `app/src/config.ts` — KV 設定ロード・検証
 - `app/src/lib/normalize.ts` `retry.ts` `html.ts` `xml.ts` `simhash.ts` `embedding.ts` `score.ts` `semantic_dedup.ts` `summarize.ts` — コアロジック（各 `.test.ts` 併設）
-- `app/src/adapters/types.ts` `github.ts` `hn.ts` `medium.ts` `fowler.ts` — ソースアダプタ（各 `.test.ts` 併設）
+- `app/src/adapters/types.ts` `feed.ts` `github.ts` `hn.ts` — ソースアダプタ（各 `.test.ts` 併設）
 - `app/src/pipeline/fetch.ts` `feed.ts` — cron パイプライン
 - `app/src/viewer/index.ts` — フィード表示
 - `app/src/viewer/settings.ts` — 設定画面（KV 読み書き）
