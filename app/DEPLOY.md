@@ -59,100 +59,16 @@ npx wrangler kv namespace create CONFIG
 出力される `id` を、`wrangler.jsonc` の `kv_namespaces[0].id`
 （現在 `REPLACE_WITH_KV_NAMESPACE_ID` プレースホルダ）に記入する。
 
-### 2-4. config.json 作成
-
-**この設定ファイルはコミットしない**（ルート `.gitignore` に `app/config.json` が登録済み）。
-`src/config.ts` の `Config` スキーマに厳密に従う（`loadConfig` が起動時に検証し、
-欠損・型不一致があれば fail-fast で throw する）。
-
-`app/config.json` を以下のテンプレートを基に作成する。
-`digest.model` は §5 で選定した値に差し替えること（テンプレートでは `REPLACE_WITH_DIGEST_MODEL`）。
-
-```json
-{
-  "interestAxes": [
-    {
-      "id": "web-fw",
-      "label": "Web フレームワーク",
-      "seedText": "Modern web frameworks and their runtime and rendering architecture: React, Next.js, Remix, Svelte, SvelteKit, Vue, Nuxt, Astro, Qwik, SolidJS. Server components, streaming SSR, hydration, islands architecture, edge rendering, routing, and build tooling."
-    },
-    {
-      "id": "ai",
-      "label": "AI / 機械学習",
-      "seedText": "Applied AI and machine learning engineering: large language models, embeddings, retrieval-augmented generation, vector search, fine-tuning, inference optimization, prompt engineering, evaluation, and integrating model APIs into production software."
-    },
-    {
-      "id": "agentic-coding",
-      "label": "エージェント型コーディング",
-      "seedText": "Agentic coding and AI-assisted software development: autonomous coding agents, LLM tool use and function calling, code generation, AI pair programming, developer copilots, agent orchestration, and workflows where models plan and edit code."
-    },
-    {
-      "id": "software-design",
-      "label": "ソフトウェア設計",
-      "seedText": "Software design and architecture: clean architecture, domain-driven design, refactoring, design patterns, testing strategy, API design, modularity, coupling and cohesion, maintainability, and engineering practices that reduce cognitive load."
-    }
-  ],
-  "sources": {
-    "githubRepos": [
-      "facebook/react",
-      "vercel/next.js",
-      "sveltejs/svelte",
-      "withastro/astro"
-    ],
-    "hnMinPoints": 50,
-    "mediumAuthorFeeds": [],
-    "mediumTagFeeds": [
-      "software-engineering",
-      "artificial-intelligence"
-    ],
-    "fowlerFeed": true
-  },
-  "scoring": {
-    "weights": {
-      "interest": 0.6,
-      "freshness": 0.3,
-      "sourceTrust": 0.1
-    },
-    "freshnessHalfLifeDays": 3,
-    "semanticDedupThreshold": 0.9,
-    "sourceTrust": {
-      "github": 1.0,
-      "fowler": 1.0,
-      "medium": 0.7,
-      "hn": 0.5
-    }
-  },
-  "embedding": {
-    "model": "@cf/baai/bge-m3",
-    "maxInputChars": 20000
-  },
-  "digest": {
-    "model": "REPLACE_WITH_DIGEST_MODEL",
-    "maxOutputTokens": 300
-  }
-}
-```
-
-補足:
-
-- `interestAxes[].seedText` は英語で書く（embedding モデル `@cf/baai/bge-m3` は多言語対応だが、
-  対象記事が英語中心のため関心軸も英語で揃える）。`githubRepos` / `mediumAuthorFeeds` /
-  `mediumTagFeeds` の中身は運用者の関心に応じて調整してよい。
-- `scoring` の各値はテンプレートが v1 の既定値。
-
-### 2-5. KV 投入（初回のみ）
-
-```bash
-npx wrangler kv key put --binding CONFIG "config:v1" --path config.json --remote
-```
-
-> **設定変更の正の経路は設定画面（`GET`/`POST /settings`）。**
-> 初回投入後の設定変更は設定画面から行う。Worker が `saveConfig`（`src/config.ts`）で
-> KV キー `config:v1` に書き戻す。`config.json` を再投入するのはリセットしたい場合のみ。
+> **KV への初期投入コマンドは不要。** 関心軸・ソース（`interestAxes` / `sources`）は
+> デプロイ後にブラウザで `/settings` を開いて入力・保存する（§5-2）。scoring / embedding /
+> digest はコード内固定（`src/config.ts` の `SYSTEM_CONFIG`）なので KV には入れない。
 
 ---
 
 ## 3. デプロイ
+
+> デプロイ前に §5-1 で `SYSTEM_CONFIG.digest.model`（`src/config.ts`）が
+> 選定済みの値になっているか確認する。
 
 ```bash
 npx wrangler deploy
@@ -181,18 +97,35 @@ Viewer（`/`・`/settings`・`/r/{id}`・`/api/feedback`）は認証を持たな
 
 ---
 
-## 5. digest LLM モデルの選定（本番前の人手作業）
+## 5. 初期設定
 
-`config.digest.model` は KV 設定値であり、**コード変更なしに差し替え可能**
-（設定画面 or `config.json` 再投入）。以下の手順で初期値を決める。
+### 5-1. digest LLM モデルの選定（デプロイ前のコード編集）
+
+`digest.model` は KV ではなく **コード内固定**（`src/config.ts` の `SYSTEM_CONFIG.digest.model`）。
+UI からは変更しない。デプロイ前に以下の手順で選定値へ差し替える（コード編集）。
 
 1. Workers AI のテキスト生成モデル一覧
    （https://developers.cloudflare.com/workers-ai/models/）から、
    **日本語対応が明記されているモデルを 2〜3 候補**選ぶ。
-2. 実記事 5 件で日本語要約品質を目視比較し、最良のものを `config.digest.model` の初期値にする。
+2. 実記事 5 件で日本語要約品質を目視比較し、最良のものを `SYSTEM_CONFIG.digest.model` の値にする。
 3. **`@cf/meta/llama-3.2-3b-instruct` は日本語品質が不十分なため選ばない。**
 
-決めた model id を §2-4 の `config.json`（または設定画面）に反映する。
+> `src/config.ts` の現状値は日本語対応候補の一例（暫定既定）で、**運用前に選定・要検証**。
+> 未検証のまま本番投入しない。
+
+### 5-2. 関心軸・ソースの投入（`/settings` で入力）
+
+関心軸（`interestAxes`）とソース（`sources`）は KV に置き、**設定画面から入力・保存する**。
+Access 保護（§4）が済んだら、ブラウザで `/settings` を開く。
+
+1. 初回は KV が空でも、既定値（`DEFAULT_USER_CONFIG`）が入った状態でフォームが開く。
+2. 関心軸（label / seedText・追加/削除）とソース（GitHub リポジトリ / Medium 著者・タグ /
+   Hacker News 最低ポイント）を編集し、**保存**する。Worker が `saveConfig`（`src/config.ts`）で
+   KV キー `config:v1` に `interestAxes` / `sources` のみを書き込む。
+3. 以後の設定変更も同じく `/settings` から行う（設定変更の正の経路）。
+
+> `seedText` を変更すると、次回日次パスで関心軸ベクトルが自動再生成される。
+> scoring / embedding / digest は `/settings` では表示のみ（変更はコード編集）。
 
 ---
 

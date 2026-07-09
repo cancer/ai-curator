@@ -1,8 +1,13 @@
 /**
- * KV 設定ロード・保存。
+ * 設定の型と KV アクセス。
  *
- * 初回のみ: `wrangler kv key put --binding CONFIG "config:v1" --path config.json --remote`
- * 以後は設定画面(タスク9)から saveConfig 経由で KV に書き戻すのが正の経路。
+ * 設定は 2 層に分かれる:
+ * - UserConfig（interestAxes / sources）: ユーザー可変データ。KV キー `config:v1`
+ *   に保存し、設定画面(/settings)から編集する。コードやファイルに書かない。
+ * - SYSTEM_CONFIG（scoring / embedding / digest）: v1 ではコード内固定。UI 非公開で、
+ *   変更するにはこの定数を編集する。
+ *
+ * 消費側（daily.ts / viewer）は `loadConfig` が返す完全な `Config`（両層のマージ）を使う。
  */
 
 import type { Env } from "./index";
@@ -54,13 +59,96 @@ export interface DigestConfig {
   maxOutputTokens: number;
 }
 
-export interface Config {
-  interestAxes: InterestAxis[];
-  sources: Sources;
+/** システム側パラメータ（v1 はコード固定・UI 非公開）。 */
+export interface SystemConfig {
   scoring: ScoringConfig;
   embedding: EmbeddingConfig;
   digest: DigestConfig;
 }
+
+/** ユーザー可変データ（KV `config:v1` に保存する唯一の対象）。 */
+export interface UserConfig {
+  interestAxes: InterestAxis[];
+  sources: Sources;
+}
+
+/** 消費側が使う完全な設定（UserConfig + SystemConfig）。 */
+export interface Config extends UserConfig, SystemConfig {}
+
+/**
+ * システム側パラメータの固定値。v1 では UI から変更せず、必要ならこの定数を編集する。
+ *
+ * digest.model は運用前にコードで選定値へ差し替える前提の暫定既定。
+ * 選定手順は DEPLOY.md §5（Workers AI の日本語対応モデルを実記事で目視比較）。
+ * 現状値は日本語対応候補の一例で、運用前に選定・要検証（未検証のまま本番投入しない）。
+ * `@cf/meta/llama-3.2-3b-instruct` は日本語品質が不十分なため選ばない。
+ */
+export const SYSTEM_CONFIG: SystemConfig = {
+  scoring: {
+    weights: {
+      interest: 0.6,
+      freshness: 0.3,
+      sourceTrust: 0.1,
+    },
+    freshnessHalfLifeDays: 3,
+    semanticDedupThreshold: 0.9,
+    sourceTrust: {
+      github: 1.0,
+      fowler: 1.0,
+      medium: 0.7,
+      hn: 0.5,
+    },
+  },
+  embedding: {
+    model: "@cf/baai/bge-m3",
+    maxInputChars: 20000,
+  },
+  digest: {
+    model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    maxOutputTokens: 300,
+  },
+};
+
+/**
+ * 初回 `GET /settings` のフォーム初期表示用の既定 UserConfig。
+ * seedText は英語で書く（対象記事が英語中心のため関心軸も英語で揃える）。
+ * 保存されるまで KV には入らない（フォームの雛形）。
+ */
+export const DEFAULT_USER_CONFIG: UserConfig = {
+  interestAxes: [
+    {
+      id: "web-fw",
+      label: "Web フレームワーク",
+      seedText:
+        "Modern web frameworks and their runtime and rendering architecture: React, Next.js, Remix, Svelte, SvelteKit, Vue, Nuxt, Astro, Qwik, SolidJS. Server components, streaming SSR, hydration, islands architecture, edge rendering, routing, and build tooling.",
+    },
+    {
+      id: "ai",
+      label: "AI / 機械学習",
+      seedText:
+        "Applied AI and machine learning engineering: large language models, embeddings, retrieval-augmented generation, vector search, fine-tuning, inference optimization, prompt engineering, evaluation, and integrating model APIs into production software.",
+    },
+    {
+      id: "agentic-coding",
+      label: "エージェント型コーディング",
+      seedText:
+        "Agentic coding and AI-assisted software development: autonomous coding agents, LLM tool use and function calling, code generation, AI pair programming, developer copilots, agent orchestration, and workflows where models plan and edit code.",
+    },
+    {
+      id: "software-design",
+      label: "ソフトウェア設計",
+      seedText:
+        "Software design and architecture: clean architecture, domain-driven design, refactoring, design patterns, testing strategy, API design, modularity, coupling and cohesion, maintainability, and engineering practices that reduce cognitive load.",
+    },
+  ],
+  sources: {
+    githubRepos: ["facebook/react", "withastro/astro"],
+    hnMinPoints: 50,
+    mediumAuthorFeeds: [],
+    mediumTagFeeds: ["software-engineering", "artificial-intelligence"],
+    fowlerFeed: true,
+  },
+};
 
 /**
  * Validate InterestAxis
@@ -155,170 +243,10 @@ function validateSources(sources: unknown): Sources {
 }
 
 /**
- * Validate ScoringWeights
+ * UserConfig（KV に置く可変データ）を検証する。
+ * 返り値は interestAxes / sources だけを持つ（システム側フィールドは含めない）。
  */
-function validateScoringWeights(weights: unknown): ScoringWeights {
-  if (!weights || typeof weights !== "object") {
-    throw new Error("scoring.weights must be an object");
-  }
-
-  const obj = weights as Record<string, unknown>;
-
-  if (typeof obj.interest !== "number") {
-    throw new Error("scoring.weights.interest must be a number");
-  }
-  if (obj.interest < 0) {
-    throw new Error("scoring.weights.interest must be a non-negative number");
-  }
-
-  if (typeof obj.freshness !== "number") {
-    throw new Error("scoring.weights.freshness must be a number");
-  }
-  if (obj.freshness < 0) {
-    throw new Error("scoring.weights.freshness must be a non-negative number");
-  }
-
-  if (typeof obj.sourceTrust !== "number") {
-    throw new Error("scoring.weights.sourceTrust must be a number");
-  }
-  if (obj.sourceTrust < 0) {
-    throw new Error("scoring.weights.sourceTrust must be a non-negative number");
-  }
-
-  return {
-    interest: obj.interest,
-    freshness: obj.freshness,
-    sourceTrust: obj.sourceTrust,
-  };
-}
-
-/**
- * Validate SourceTrustScores
- */
-function validateSourceTrustScores(trust: unknown): SourceTrustScores {
-  if (!trust || typeof trust !== "object") {
-    throw new Error("scoring.sourceTrust must be an object");
-  }
-
-  const obj = trust as Record<string, unknown>;
-
-  if (typeof obj.github !== "number") {
-    throw new Error("scoring.sourceTrust.github must be a number");
-  }
-  if (obj.github < 0) {
-    throw new Error("scoring.sourceTrust.github must be a non-negative number");
-  }
-
-  if (typeof obj.fowler !== "number") {
-    throw new Error("scoring.sourceTrust.fowler must be a number");
-  }
-  if (obj.fowler < 0) {
-    throw new Error("scoring.sourceTrust.fowler must be a non-negative number");
-  }
-
-  if (typeof obj.medium !== "number") {
-    throw new Error("scoring.sourceTrust.medium must be a number");
-  }
-  if (obj.medium < 0) {
-    throw new Error("scoring.sourceTrust.medium must be a non-negative number");
-  }
-
-  if (typeof obj.hn !== "number") {
-    throw new Error("scoring.sourceTrust.hn must be a number");
-  }
-  if (obj.hn < 0) {
-    throw new Error("scoring.sourceTrust.hn must be a non-negative number");
-  }
-
-  return {
-    github: obj.github,
-    fowler: obj.fowler,
-    medium: obj.medium,
-    hn: obj.hn,
-  };
-}
-
-/**
- * Validate ScoringConfig
- */
-function validateScoringConfig(scoring: unknown): ScoringConfig {
-  if (!scoring || typeof scoring !== "object") {
-    throw new Error("scoring must be an object");
-  }
-
-  const obj = scoring as Record<string, unknown>;
-
-  if (typeof obj.freshnessHalfLifeDays !== "number" || obj.freshnessHalfLifeDays <= 0) {
-    throw new Error("scoring.freshnessHalfLifeDays must be a positive number");
-  }
-
-  if (typeof obj.semanticDedupThreshold !== "number") {
-    throw new Error("scoring.semanticDedupThreshold must be a number");
-  }
-  if (obj.semanticDedupThreshold < 0 || obj.semanticDedupThreshold > 1) {
-    throw new Error("scoring.semanticDedupThreshold must be a number in [0, 1]");
-  }
-
-  return {
-    weights: validateScoringWeights(obj.weights),
-    freshnessHalfLifeDays: obj.freshnessHalfLifeDays,
-    semanticDedupThreshold: obj.semanticDedupThreshold,
-    sourceTrust: validateSourceTrustScores(obj.sourceTrust),
-  };
-}
-
-/**
- * Validate EmbeddingConfig
- */
-function validateEmbeddingConfig(embedding: unknown): EmbeddingConfig {
-  if (!embedding || typeof embedding !== "object") {
-    throw new Error("embedding must be an object");
-  }
-
-  const obj = embedding as Record<string, unknown>;
-
-  if (typeof obj.model !== "string" || obj.model.trim() === "") {
-    throw new Error("embedding.model must be a non-empty string");
-  }
-
-  if (typeof obj.maxInputChars !== "number" || obj.maxInputChars <= 0) {
-    throw new Error("embedding.maxInputChars must be a positive integer");
-  }
-
-  return {
-    model: obj.model,
-    maxInputChars: obj.maxInputChars,
-  };
-}
-
-/**
- * Validate DigestConfig
- */
-function validateDigestConfig(digest: unknown): DigestConfig {
-  if (!digest || typeof digest !== "object") {
-    throw new Error("digest must be an object");
-  }
-
-  const obj = digest as Record<string, unknown>;
-
-  if (typeof obj.model !== "string" || obj.model.trim() === "") {
-    throw new Error("digest.model must be a non-empty string");
-  }
-
-  if (typeof obj.maxOutputTokens !== "number" || obj.maxOutputTokens <= 0) {
-    throw new Error("digest.maxOutputTokens must be a positive integer");
-  }
-
-  return {
-    model: obj.model,
-    maxOutputTokens: obj.maxOutputTokens,
-  };
-}
-
-/**
- * Validate Config
- */
-function validateConfig(data: unknown): Config {
+function validateUserConfig(data: unknown): UserConfig {
   if (!data || typeof data !== "object") {
     throw new Error("Config must be an object");
   }
@@ -349,15 +277,12 @@ function validateConfig(data: unknown): Config {
   return {
     interestAxes,
     sources: validateSources(obj.sources),
-    scoring: validateScoringConfig(obj.scoring),
-    embedding: validateEmbeddingConfig(obj.embedding),
-    digest: validateDigestConfig(obj.digest),
   };
 }
 
 /**
- * Load config from KV.
- * Validates required fields (fail-fast). Throws on missing or invalid data.
+ * KV の UserConfig を検証し、SYSTEM_CONFIG をマージして完全な Config を返す。
+ * KV 欠落・JSON 不正・検証失敗は throw（fail-fast。黙って既定値にしない）。
  */
 export async function loadConfig(env: Env): Promise<Config> {
   const raw = await env.CONFIG.get("config:v1");
@@ -375,16 +300,32 @@ export async function loadConfig(env: Env): Promise<Config> {
     );
   }
 
-  return validateConfig(data);
+  return { ...validateUserConfig(data), ...SYSTEM_CONFIG };
 }
 
 /**
- * Save config to KV.
- * Validates before saving. Throws on validation failure.
+ * UserConfig を検証し、interestAxes / sources のみを KV に書く。
+ * 検証違反は throw（呼び出し側で 400 にする）。
  */
-export async function saveConfig(env: Env, config: Config): Promise<void> {
-  // Validate before saving
-  const validated = validateConfig(config);
+export async function saveConfig(env: Env, user: UserConfig): Promise<void> {
+  const validated = validateUserConfig(user);
 
   await env.CONFIG.put("config:v1", JSON.stringify(validated));
+}
+
+/**
+ * 設定画面の初期表示用。KV が存在し妥当なら KV の UserConfig を、
+ * 無い・不正なら DEFAULT_USER_CONFIG を返す（throw しない。空 KV でもフォームを開ける）。
+ */
+export async function loadUserConfigForForm(env: Env): Promise<UserConfig> {
+  const raw = await env.CONFIG.get("config:v1");
+  if (!raw) {
+    return DEFAULT_USER_CONFIG;
+  }
+
+  try {
+    return validateUserConfig(JSON.parse(raw));
+  } catch {
+    return DEFAULT_USER_CONFIG;
+  }
 }

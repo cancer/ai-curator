@@ -162,8 +162,11 @@ CREATE TABLE feed_trends (
 
 - **対象**: `app/src/config.ts`
 - **作業内容**:
-  - KV キー `config:v1` に JSON で全設定を置く（設計 §6.1: 関心軸・監視対象は個人データかつ可変なのでコードに書かない）
-  - 設定スキーマ（この形をそのまま実装する）:
+  - 設定を 2 層に分ける（設計 §6.1）。**KV に置くのは可変データ（`interestAxes` / `sources`）のみ**で、
+    設定画面（タスク 9）から投入・編集する（コードやファイルに手書きしない。`config.json` は使わない）。
+    system パラメータ（`scoring` / `embedding` / `digest`）は v1 では **コード内固定**（`SYSTEM_CONFIG`）で、
+    UI 非公開・変更はコード編集。
+  - KV に置く UserConfig のスキーマ（この形をそのまま実装する）:
 
 ```jsonc
 {
@@ -177,22 +180,22 @@ CREATE TABLE feed_trends (
     "mediumAuthorFeeds": ["@author"],
     "mediumTagFeeds": ["tag-name"],
     "fowlerFeed": true
-  },
-  "scoring": {
-    "weights": { "interest": 0.6, "freshness": 0.3, "sourceTrust": 0.1 },
-    "freshnessHalfLifeDays": 3,
-    "semanticDedupThreshold": 0.9,
-    "sourceTrust": { "github": 1.0, "fowler": 1.0, "medium": 0.7, "hn": 0.5 }
-  },
-  "embedding": { "model": "@cf/baai/bge-m3", "maxInputChars": 20000 },
-  "digest": { "model": "<タスク8で選定>", "maxOutputTokens": 300 }
+  }
 }
 ```
 
-  - 起動時（各 cron 実行の冒頭）に KV から読み、必須フィールドの欠落は即エラーで落とす（フェイルファスト。黙って既定値にしない）
-  - 数値パラメータは上記が暫定確定値（PoC で「上位/下位の分離が機能する」ことを確認済みの値）
-- **投入手順も書く**: 初回のみ `wrangler kv key put --binding CONFIG "config:v1" --path config.json --remote`（config.json はコミットしない。`.gitignore` に追加）。**初回投入後の変更は設定画面（タスク 9）から行う**のが正の経路。Worker 側から `env.CONFIG.put("config:v1", ...)` で書き戻すため、KV の値が常に最新の正
-- 読み書きが 1 箇所になるよう、`loadConfig(env)` と `saveConfig(env, config)`（バリデーション込み）を config.ts に置く。バリデーション違反の保存は 400 で拒否（壊れた設定で cron を走らせない）
+  - system パラメータはコード定数 `SYSTEM_CONFIG`（`scoring` / `embedding` / `digest`）に固定。
+    `digest.model` は運用前にコードで選定値へ差し替える前提の暫定既定（`llama-3.2-3b` は使わない）。
+    数値は暫定確定値（PoC で「上位/下位の分離が機能する」ことを確認済みの値）。
+  - `loadConfig(env)` は KV の UserConfig を検証（fail-fast: 欠落・型不一致・空 interestAxes は即 throw。
+    黙って既定値にしない）し、`SYSTEM_CONFIG` をマージして完全な `Config` を返す。
+- **投入は設定画面から**: `config.json` も `wrangler kv key put` も使わない。デプロイ後にブラウザで
+  `/settings` を開くと、初回は既定値（`DEFAULT_USER_CONFIG`）が入った状態でフォームが開くので、
+  関心軸・ソースを入力して保存する。Worker 側から `env.CONFIG.put("config:v1", ...)` で書き戻すため、
+  KV の値が常に最新の正。
+- 読み書きが 1 箇所になるよう、`loadConfig(env)`・`saveConfig(env, user)`（UserConfig のみ書く。
+  バリデーション込み）・`loadUserConfigForForm(env)`（空 KV でも throw せず既定を返す。フォーム用）を
+  config.ts に置く。バリデーション違反の保存は 400 で拒否（壊れた設定で cron を走らせない）
 
 ### タスク 4: 共通ユーティリティ
 
@@ -313,7 +316,7 @@ interface NormalizedArticle {
    - LLM 呼び出し: `env.AI.run(config.digest.model, { messages, max_tokens: 300 })`。system プロンプト: 「あなたは技術ニュースの編集者です。与えられた記事のタイトルと本文抜粋から、内容を 2〜3 文の**日本語**で要約してください。誇張や主観的評価を避け、記事の主旨を簡潔に伝えてください。」 user: `タイトル: {title}\n\n本文抜粋:\n{body の先頭 6,000 字}`
    - 生成した要約を feed_entries.summary に保存（自前生成物なので保存可）
 7. **傾向サマリ（feed_trends）**: 軸ごとに hit_count（当日記事の hit_axis 集計）を出し、軸ごとに「その軸のタイトル上位 10 件」を入力に LLM で 1〜2 文の日本語叙述を生成して narrative に保存
-- **digest LLM モデルの選定**（実装時に行う）: Workers AI のテキスト生成モデル一覧（https://developers.cloudflare.com/workers-ai/models/）から日本語対応を明記するモデルを 2〜3 候補選び、実記事 5 件で日本語要約品質を目視比較して初期値を決める。**llama-3.2-3b-instruct は日本語品質不十分のため選ばない**（前提知識 10）。モデル id は KV 設定値なのでコード変更なしに差し替え可能
+- **digest LLM モデルの選定**（実装時に行う）: Workers AI のテキスト生成モデル一覧（https://developers.cloudflare.com/workers-ai/models/）から日本語対応を明記するモデルを 2〜3 候補選び、実記事 5 件で日本語要約品質を目視比較して初期値を決める。**llama-3.2-3b-instruct は日本語品質不十分のため選ばない**（前提知識 10）。モデル id は `SYSTEM_CONFIG.digest.model`（コード内固定）なので、運用前にコード編集で選定値へ差し替える（UI 非公開）
 - **テスト**: score / cosine / freshness / 意味的 Dedup / SimHash 以外に、「本文なし記事が混ざっても要約ステップが落ちない」ことをモックでテスト
 
 ### タスク 9: Viewer + 設定画面 + フィードバック収集
@@ -330,7 +333,7 @@ interface NormalizedArticle {
   - **公開経路を作らない**: RSS 出力・共有リンク・SNS 投稿機能を実装しない（要件 FR-7）
 
 **(b) 設定画面（FR-8）**
-  - `GET /settings` : 現在の config（KV）をフォームで表示。編集対象は (1) 関心軸（label / seedText の編集、軸の追加・削除） (2) ソース（githubRepos / mediumAuthorFeeds / mediumTagFeeds の各リスト、hnMinPoints）。scoring 等の数値パラメータは v1 では表示のみ（誤操作防止。変更は wrangler で）
+  - `GET /settings` : KV の UserConfig（`interestAxes` / `sources`。空なら既定）をフォームで表示。編集対象は (1) 関心軸（label / seedText の編集、軸の追加・削除） (2) ソース（githubRepos / mediumAuthorFeeds / mediumTagFeeds の各リスト、hnMinPoints）。scoring 等の system パラメータは v1 では表示のみ（誤操作防止。変更はコード編集 `SYSTEM_CONFIG` で）
   - `POST /settings` : バリデーション（axis id 形式、repo が `owner/name` 形式、数値範囲）を通れば `saveConfig` で KV を更新し、303 で `GET /settings` に戻す。エラーは 400 + 入力値保持
   - seedText を変更した場合、次回の日次パスで関心軸ベクトルが自動再生成される（タスク 7 の seed_hash 検知）。その旨を画面に注記する
   - フォームは素の HTML `<form method="post">`。JS 必須にしない
@@ -346,7 +349,7 @@ interface NormalizedArticle {
 
 - **作業内容**（手順書として実行）:
   1. D1 作成: `wrangler d1 create ai-curator` → wrangler.jsonc に id 記入 → migrations apply --remote
-  2. KV 作成: `wrangler kv namespace create CONFIG` → id 記入 → config.json 投入（タスク 3）
+  2. KV 作成: `wrangler kv namespace create CONFIG` → id 記入（初期投入は不要。関心軸・ソースはデプロイ後に `/settings` で入力）
   3. `wrangler deploy`
   4. **Cloudflare Access で Worker の URL を保護**: Zero Trust ダッシュボード → Access → Applications → Self-hosted で workers.dev ドメイン（またはカスタムドメイン）を登録し、自分のメールアドレスのみ許可するポリシーを設定。**設定完了までフィードにはダミーデータ以外を入れない**
   5. 動作確認: `wrangler dev --test-scheduled` でローカル cron 発火（`curl "http://localhost:8787/__scheduled?cron=0+*/3+*+*+*"` 等）→ 本番は `wrangler tail` でログを見ながら初回 cron を待つ（または dashboard から手動トリガ）
@@ -376,7 +379,7 @@ interface NormalizedArticle {
 - `app/src/viewer/settings.ts` — 設定画面（KV 読み書き）
 - `app/src/viewer/feedback.ts` — クリック記録リダイレクト + 評価 API
 - `app/test/fixtures/*` — 合成 fixture（実データ禁止）
-- ルート `.gitignore` に `app/config.json` を追加
+- （`config.json` は使わない。KV へは `/settings` から投入する）
 
 ## 7. 検証方法
 
@@ -392,7 +395,7 @@ interface NormalizedArticle {
 - 第 1 陣（並列可）: タスク 1 → 完了後に 2 / 3 / 4 / 7 を並列
 - 第 2 陣: タスク 5（4 に依存。アダプタ 4 本はさらに並列可）
 - 第 3 陣: タスク 6 → 8 → 9（直列）
-- 最後: タスク 10（人間の操作を含む: Access 設定・KV 投入）
+- 最後: タスク 10（人間の操作を含む: Access 設定・`/settings` からの設定投入）
 
 単独で順に進める場合は `/implement-issue` 相当のフローでタスク番号順に。いずれの場合も各タスクで write-code スキル（テスト先行）に従うこと。
 

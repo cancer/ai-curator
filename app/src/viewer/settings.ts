@@ -1,11 +1,12 @@
 /**
- * 設定画面（FR-8）。現在の config をフォーム表示し、更新を KV に書き戻す。
+ * 設定画面（FR-8）。KV の UserConfig（interestAxes / sources）をフォーム表示し、
+ * 更新を KV に書き戻す。
  *
  * 編集対象: 関心軸（label / seedText / 追加・削除）と
  * ソース（githubRepos / mediumAuthorFeeds / mediumTagFeeds / hnMinPoints）。
- * scoring 等の数値パラメータは表示のみ（変更不可）。
- * 変更不可のフィールド（scoring / embedding / digest / fowlerFeed）は
- * 読み込んだ config の値をそのまま保存する。
+ * scoring 等のシステム側パラメータ（SYSTEM_CONFIG）は表示のみ（UI で変更しない）。
+ * フォームに無い fowlerFeed は、読み込んだ UserConfig の値をそのまま保存する。
+ * KV が空でも DEFAULT_USER_CONFIG でフォームを開ける。
  *
  * 素の HTML `<form method="post">` のみで完結させる（JS を必須にしない）。
  * 追加は末尾の空行に入力、削除は各行の削除チェックボックスで行う。
@@ -13,9 +14,11 @@
 
 import type { Env } from "../index";
 import {
-  type Config,
   type InterestAxis,
-  loadConfig,
+  type ScoringConfig,
+  type UserConfig,
+  SYSTEM_CONFIG,
+  loadUserConfigForForm,
   saveConfig,
 } from "../config";
 import { escapeHtml, page, htmlResponse } from "./layout";
@@ -38,17 +41,17 @@ interface FormModel {
   hnMinPoints: string;
 }
 
-function modelFromConfig(config: Config): FormModel {
+function modelFromUserConfig(user: UserConfig): FormModel {
   return {
-    axes: config.interestAxes.map((a) => ({
+    axes: user.interestAxes.map((a) => ({
       id: a.id,
       label: a.label,
       seedText: a.seedText,
     })),
-    githubRepos: config.sources.githubRepos.join("\n"),
-    mediumAuthorFeeds: config.sources.mediumAuthorFeeds.join("\n"),
-    mediumTagFeeds: config.sources.mediumTagFeeds.join("\n"),
-    hnMinPoints: String(config.sources.hnMinPoints),
+    githubRepos: user.sources.githubRepos.join("\n"),
+    mediumAuthorFeeds: user.sources.mediumAuthorFeeds.join("\n"),
+    mediumTagFeeds: user.sources.mediumTagFeeds.join("\n"),
+    hnMinPoints: String(user.sources.hnMinPoints),
   };
 }
 
@@ -121,15 +124,14 @@ function validate(model: FormModel): string[] {
   return errors;
 }
 
-/** 検証済みモデルと元 config から、保存用の Config を組み立てる。 */
-function buildConfig(model: FormModel, base: Config): Config {
+/** 検証済みモデルと元 UserConfig から、保存用の UserConfig を組み立てる。 */
+function buildUserConfig(model: FormModel, base: UserConfig): UserConfig {
   const interestAxes: InterestAxis[] = model.axes.map((a) => ({
     id: a.id,
     label: a.label,
     seedText: a.seedText,
   }));
   return {
-    ...base,
     interestAxes,
     sources: {
       ...base.sources,
@@ -164,7 +166,7 @@ function renderAxis(
 
 function renderForm(
   model: FormModel,
-  scoring: Config["scoring"],
+  scoring: ScoringConfig,
   lockedIds: Set<string>,
   errors: string[],
 ): string {
@@ -214,12 +216,12 @@ function renderForm(
   return page("設定", body);
 }
 
-/** `GET /settings`: 現在の config をフォーム表示する。 */
+/** `GET /settings`: KV の UserConfig（空なら既定）をフォーム表示する。 */
 export async function renderSettingsForm(env: Env): Promise<Response> {
-  const config = await loadConfig(env);
-  const lockedIds = new Set(config.interestAxes.map((a) => a.id));
+  const user = await loadUserConfigForForm(env);
+  const lockedIds = new Set(user.interestAxes.map((a) => a.id));
   return htmlResponse(
-    renderForm(modelFromConfig(config), config.scoring, lockedIds, []),
+    renderForm(modelFromUserConfig(user), SYSTEM_CONFIG.scoring, lockedIds, []),
   );
 }
 
@@ -231,7 +233,7 @@ export async function handleSettingsUpdate(
   env: Env,
   request: Request,
 ): Promise<Response> {
-  const base = await loadConfig(env);
+  const base = await loadUserConfigForForm(env);
   const lockedIds = new Set(base.interestAxes.map((a) => a.id));
 
   const form = await request.formData();
@@ -240,12 +242,15 @@ export async function handleSettingsUpdate(
   const errors = validate(model);
   if (errors.length === 0) {
     try {
-      await saveConfig(env, buildConfig(model, base));
+      await saveConfig(env, buildUserConfig(model, base));
       return new Response(null, { status: 303, headers: { location: "/settings" } });
     } catch (e) {
       errors.push(e instanceof Error ? e.message : String(e));
     }
   }
 
-  return htmlResponse(renderForm(model, base.scoring, lockedIds, errors), 400);
+  return htmlResponse(
+    renderForm(model, SYSTEM_CONFIG.scoring, lockedIds, errors),
+    400,
+  );
 }

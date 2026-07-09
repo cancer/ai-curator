@@ -1,9 +1,16 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { loadConfig, saveConfig, type Config } from "./config";
+import { describe, it, expect, vi } from "vitest";
+import {
+  loadConfig,
+  saveConfig,
+  loadUserConfigForForm,
+  SYSTEM_CONFIG,
+  DEFAULT_USER_CONFIG,
+  type UserConfig,
+} from "./config";
 import type { Env } from "./index";
 
-// Valid minimal config for testing
-const validConfig: Config = {
+// KV に置くのは interestAxes / sources のみ（ユーザー可変データ）。
+const validUser: UserConfig = {
   interestAxes: [
     {
       id: "web-fw",
@@ -23,32 +30,8 @@ const validConfig: Config = {
     mediumTagFeeds: ["tag-name"],
     fowlerFeed: true,
   },
-  scoring: {
-    weights: {
-      interest: 0.6,
-      freshness: 0.3,
-      sourceTrust: 0.1,
-    },
-    freshnessHalfLifeDays: 3,
-    semanticDedupThreshold: 0.9,
-    sourceTrust: {
-      github: 1.0,
-      fowler: 1.0,
-      medium: 0.7,
-      hn: 0.5,
-    },
-  },
-  embedding: {
-    model: "@cf/baai/bge-m3",
-    maxInputChars: 20000,
-  },
-  digest: {
-    model: "gpt-4",
-    maxOutputTokens: 300,
-  },
 };
 
-// Create a mock Env with properly typed KVNamespace mock
 function createMockEnv(): Env {
   return {
     AI: {} as any,
@@ -62,428 +45,334 @@ function createMockEnv(): Env {
 
 describe("config", () => {
   describe("loadConfig", () => {
-    it("should load valid config from KV", async () => {
+    it("merges the KV UserConfig with SYSTEM_CONFIG into a full Config", async () => {
       const env = createMockEnv();
-      const configJson = JSON.stringify(validConfig);
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(configJson);
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(
+        JSON.stringify(validUser),
+      );
 
       const result = await loadConfig(env);
 
-      expect(result).toEqual(validConfig);
+      expect(result).toEqual({ ...validUser, ...SYSTEM_CONFIG });
       expect(env.CONFIG.get).toHaveBeenCalledWith("config:v1");
     });
 
-    it("should throw when config key is not found", async () => {
+    it("ignores system fields present in the KV value and uses SYSTEM_CONFIG", async () => {
+      const env = createMockEnv();
+      const polluted = {
+        ...validUser,
+        scoring: { garbage: true },
+        embedding: { model: "x", maxInputChars: 1 },
+        digest: { model: "y", maxOutputTokens: 1 },
+      };
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(
+        JSON.stringify(polluted),
+      );
+
+      const result = await loadConfig(env);
+
+      expect(result.scoring).toEqual(SYSTEM_CONFIG.scoring);
+      expect(result.embedding).toEqual(SYSTEM_CONFIG.embedding);
+      expect(result.digest).toEqual(SYSTEM_CONFIG.digest);
+    });
+
+    it("throws when config key is not found", async () => {
       const env = createMockEnv();
       vi.mocked(env.CONFIG.get as any).mockResolvedValue(null);
 
       await expect(loadConfig(env)).rejects.toThrow(
-        'Config key "config:v1" not found in KV'
+        'Config key "config:v1" not found in KV',
       );
     });
 
-    it("should throw when JSON is invalid", async () => {
+    it("throws when JSON is invalid", async () => {
       const env = createMockEnv();
       vi.mocked(env.CONFIG.get as any).mockResolvedValue("invalid json {");
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "Failed to parse config JSON"
+        "Failed to parse config JSON",
       );
     });
 
-    it("should throw when interestAxes is missing", async () => {
+    it("throws when interestAxes is missing", async () => {
       const env = createMockEnv();
-      const config = { ...validConfig };
-      delete (config as any).interestAxes;
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      const user = { ...validUser };
+      delete (user as any).interestAxes;
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "interestAxes must be an array"
+        "interestAxes must be an array",
       );
     });
 
-    it("should throw when interestAxes element has empty id", async () => {
+    it("throws when interestAxes is empty", async () => {
       const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        interestAxes: [
-          { id: "", label: "Web FW", seedText: "text" },
-        ],
+      const user = { ...validUser, interestAxes: [] };
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "interestAxes must not be empty",
+      );
+    });
+
+    it("throws when an interestAxis has an empty id", async () => {
+      const env = createMockEnv();
+      const user = {
+        ...validUser,
+        interestAxes: [{ id: "", label: "Web FW", seedText: "text" }],
       };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "InterestAxis.id must be a non-empty string"
+        "InterestAxis.id must be a non-empty string",
       );
     });
 
-    it("should throw when interestAxes element has empty seedText", async () => {
+    it("throws when an interestAxis has an empty label", async () => {
       const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        interestAxes: [
-          { id: "web-fw", label: "Web FW", seedText: "" },
-        ],
+      const user = {
+        ...validUser,
+        interestAxes: [{ id: "web-fw", label: "", seedText: "text" }],
       };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "InterestAxis.seedText must be a non-empty string"
+        "InterestAxis.label must be a non-empty string",
       );
     });
 
-    it("should throw when interestAxes is empty", async () => {
+    it("throws when an interestAxis has an empty seedText", async () => {
       const env = createMockEnv();
-      const config = { ...validConfig, interestAxes: [] };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      const user = {
+        ...validUser,
+        interestAxes: [{ id: "web-fw", label: "Web FW", seedText: "" }],
+      };
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "interestAxes must not be empty"
+        "InterestAxis.seedText must be a non-empty string",
       );
     });
 
-    it("should throw when interestAxes has duplicate ids", async () => {
+    it("throws when interestAxes has duplicate ids", async () => {
       const env = createMockEnv();
-      const config = {
-        ...validConfig,
+      const user = {
+        ...validUser,
         interestAxes: [
           { id: "dup", label: "A", seedText: "a" },
           { id: "dup", label: "B", seedText: "b" },
         ],
       };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        'Duplicate interestAxis id: "dup"'
+        'Duplicate interestAxis id: "dup"',
       );
     });
 
-    it("should throw when interestAxes element has empty label", async () => {
+    it("throws when sources is missing", async () => {
       const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        interestAxes: [{ id: "web-fw", label: "", seedText: "text" }],
+      const user = { ...validUser };
+      delete (user as any).sources;
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
+
+      await expect(loadConfig(env)).rejects.toThrow("sources must be an object");
+    });
+
+    it("throws when sources.githubRepos is not an array", async () => {
+      const env = createMockEnv();
+      const user = {
+        ...validUser,
+        sources: { ...validUser.sources, githubRepos: "not-array" },
       };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "InterestAxis.label must be a non-empty string"
+        "sources.githubRepos must be an array",
       );
     });
 
-    it("should throw when sources.hnMinPoints is negative", async () => {
+    it("throws when githubRepos has a non owner/repo entry", async () => {
       const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        sources: { ...validConfig.sources, hnMinPoints: -1 },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.hnMinPoints must be a non-negative integer"
-      );
-    });
-
-    it("should throw when sources.hnMinPoints is not an integer", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        sources: { ...validConfig.sources, hnMinPoints: 1.5 },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.hnMinPoints must be a non-negative integer"
-      );
-    });
-
-    it("should throw when a scoring.weights value is negative", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        scoring: {
-          ...validConfig.scoring,
-          weights: { interest: 0.6, freshness: -0.1, sourceTrust: 0.1 },
+      const user = {
+        ...validUser,
+        sources: {
+          ...validUser.sources,
+          githubRepos: ["owner/repo", "not-a-repo"],
         },
       };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "scoring.weights.freshness must be a non-negative number"
+        'sources.githubRepos entries must be "owner/repo" strings',
       );
     });
 
-    it("should throw when scoring.semanticDedupThreshold is out of [0,1]", async () => {
+    it("throws when sources.hnMinPoints is negative", async () => {
       const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        scoring: { ...validConfig.scoring, semanticDedupThreshold: 1.5 },
+      const user = {
+        ...validUser,
+        sources: { ...validUser.sources, hnMinPoints: -1 },
       };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "scoring.semanticDedupThreshold must be a number in [0, 1]"
+        "sources.hnMinPoints must be a non-negative integer",
       );
     });
 
-    it("should throw when a scoring.sourceTrust value is negative", async () => {
+    it("throws when sources.hnMinPoints is not an integer", async () => {
       const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        scoring: {
-          ...validConfig.scoring,
-          sourceTrust: { github: 1.0, fowler: 1.0, medium: 0.7, hn: -0.5 },
-        },
+      const user = {
+        ...validUser,
+        sources: { ...validUser.sources, hnMinPoints: 1.5 },
       };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "scoring.sourceTrust.hn must be a non-negative number"
+        "sources.hnMinPoints must be a non-negative integer",
       );
     });
 
-    it("should throw when scoring.freshnessHalfLifeDays is not positive", async () => {
+    it("throws when mediumTagFeeds has a non-string entry", async () => {
       const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        scoring: { ...validConfig.scoring, freshnessHalfLifeDays: 0 },
+      const user = {
+        ...validUser,
+        sources: { ...validUser.sources, mediumTagFeeds: [true] },
       };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "scoring.freshnessHalfLifeDays must be a positive number"
+        "sources.mediumTagFeeds entries must be strings",
       );
     });
 
-    it("should throw when githubRepos has a non owner/repo entry", async () => {
+    it("throws when sources.fowlerFeed is missing", async () => {
       const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        sources: { ...validConfig.sources, githubRepos: ["owner/repo", "not-a-repo"] },
+      const user = {
+        ...validUser,
+        sources: { ...validUser.sources },
       };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        'sources.githubRepos entries must be "owner/repo" strings'
-      );
-    });
-
-    it("should throw when mediumAuthorFeeds has a non-string entry", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        sources: { ...validConfig.sources, mediumAuthorFeeds: ["@ok", 123] },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
+      delete (user.sources as any).fowlerFeed;
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow(
-        "sources.mediumAuthorFeeds entries must be strings"
-      );
-    });
-
-    it("should throw when mediumTagFeeds has a non-string entry", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        sources: { ...validConfig.sources, mediumTagFeeds: [true] },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.mediumTagFeeds entries must be strings"
-      );
-    });
-
-    it("should throw when sources is missing", async () => {
-      const env = createMockEnv();
-      const config = { ...validConfig };
-      delete (config as any).sources;
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources must be an object"
-      );
-    });
-
-    it("should throw when sources.githubRepos is not an array", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        sources: { ...validConfig.sources, githubRepos: "not-array" },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.githubRepos must be an array"
-      );
-    });
-
-    it("should throw when sources.hnMinPoints is not a number", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        sources: { ...validConfig.sources, hnMinPoints: "not-number" },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.hnMinPoints must be a number"
-      );
-    });
-
-    it("should throw when scoring.weights has missing field", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        scoring: {
-          ...validConfig.scoring,
-          weights: { interest: 0.6, freshness: 0.3 },
-        },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "scoring.weights.sourceTrust must be a number"
-      );
-    });
-
-    it("should throw when embedding.model is empty string", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        embedding: { ...validConfig.embedding, model: "" },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "embedding.model must be a non-empty string"
-      );
-    });
-
-    it("should throw when embedding.maxInputChars is not positive", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        embedding: { ...validConfig.embedding, maxInputChars: 0 },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "embedding.maxInputChars must be a positive integer"
-      );
-    });
-
-    it("should throw when digest.maxOutputTokens is not positive", async () => {
-      const env = createMockEnv();
-      const config = {
-        ...validConfig,
-        digest: { ...validConfig.digest, maxOutputTokens: 0 },
-      };
-
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(config));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "digest.maxOutputTokens must be a positive integer"
+        "sources.fowlerFeed must be a boolean",
       );
     });
   });
 
   describe("saveConfig", () => {
-    it("should save valid config to KV", async () => {
+    it("writes only interestAxes and sources to KV", async () => {
       const env = createMockEnv();
       vi.mocked(env.CONFIG.put as any).mockResolvedValue(undefined);
 
-      await saveConfig(env, validConfig);
+      await saveConfig(env, validUser);
 
       expect(env.CONFIG.put).toHaveBeenCalledWith(
         "config:v1",
-        JSON.stringify(validConfig)
+        JSON.stringify(validUser),
       );
     });
 
-    it("should throw validation error when saving invalid config", async () => {
-      const env = createMockEnv();
-      const invalidConfig = {
-        ...validConfig,
-        embedding: { ...validConfig.embedding, maxInputChars: -1 },
-      };
-
-      await expect(saveConfig(env, invalidConfig as any)).rejects.toThrow(
-        "embedding.maxInputChars must be a positive integer"
-      );
-
-      // Verify put was never called
-      expect(env.CONFIG.put).not.toHaveBeenCalled();
-    });
-
-    it("should reject config with missing sources.fowlerFeed", async () => {
-      const env = createMockEnv();
-      const invalidConfig = {
-        ...validConfig,
-        sources: { ...validConfig.sources },
-      };
-      delete (invalidConfig.sources as any).fowlerFeed;
-
-      await expect(saveConfig(env, invalidConfig as any)).rejects.toThrow(
-        "sources.fowlerFeed must be a boolean"
-      );
-
-      expect(env.CONFIG.put).not.toHaveBeenCalled();
-    });
-
-    it("should accept empty lists in sources", async () => {
+    it("never persists system fields even if present on the argument", async () => {
       const env = createMockEnv();
       vi.mocked(env.CONFIG.put as any).mockResolvedValue(undefined);
 
-      const config: Config = {
-        ...validConfig,
+      const polluted = {
+        ...validUser,
+        scoring: { anything: true },
+        digest: { model: "z", maxOutputTokens: 1 },
+      };
+
+      await saveConfig(env, polluted as any);
+
+      const [, written] = vi.mocked(env.CONFIG.put as any).mock.calls[0];
+      const parsed = JSON.parse(written as string);
+      expect(Object.keys(parsed).sort()).toEqual(["interestAxes", "sources"]);
+    });
+
+    it("throws validation error and does not write when UserConfig is invalid", async () => {
+      const env = createMockEnv();
+      const invalid = {
+        ...validUser,
+        interestAxes: [{ id: "web-fw", label: "Web FW", seedText: "" }],
+      };
+
+      await expect(saveConfig(env, invalid as any)).rejects.toThrow(
+        "InterestAxis.seedText must be a non-empty string",
+      );
+      expect(env.CONFIG.put).not.toHaveBeenCalled();
+    });
+
+    it("accepts empty source lists", async () => {
+      const env = createMockEnv();
+      vi.mocked(env.CONFIG.put as any).mockResolvedValue(undefined);
+
+      const user: UserConfig = {
+        ...validUser,
         sources: {
-          ...validConfig.sources,
+          ...validUser.sources,
           githubRepos: [],
           mediumAuthorFeeds: [],
           mediumTagFeeds: [],
         },
       };
 
-      await saveConfig(env, config);
+      await saveConfig(env, user);
 
       expect(env.CONFIG.put).toHaveBeenCalled();
     });
+  });
 
-    it("should accept digest.model with any non-empty string", async () => {
+  describe("loadUserConfigForForm", () => {
+    it("returns the KV UserConfig when present and valid", async () => {
+      const env = createMockEnv();
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(
+        JSON.stringify(validUser),
+      );
+
+      const result = await loadUserConfigForForm(env);
+
+      expect(result).toEqual(validUser);
+    });
+
+    it("returns DEFAULT_USER_CONFIG when KV is empty (does not throw)", async () => {
+      const env = createMockEnv();
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(null);
+
+      const result = await loadUserConfigForForm(env);
+
+      expect(result).toEqual(DEFAULT_USER_CONFIG);
+    });
+
+    it("returns DEFAULT_USER_CONFIG when KV JSON is invalid (does not throw)", async () => {
+      const env = createMockEnv();
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue("broken {");
+
+      const result = await loadUserConfigForForm(env);
+
+      expect(result).toEqual(DEFAULT_USER_CONFIG);
+    });
+
+    it("returns DEFAULT_USER_CONFIG when KV value fails validation (does not throw)", async () => {
+      const env = createMockEnv();
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(
+        JSON.stringify({ ...validUser, interestAxes: [] }),
+      );
+
+      const result = await loadUserConfigForForm(env);
+
+      expect(result).toEqual(DEFAULT_USER_CONFIG);
+    });
+  });
+
+  describe("DEFAULT_USER_CONFIG", () => {
+    it("is a valid UserConfig that can be saved", async () => {
       const env = createMockEnv();
       vi.mocked(env.CONFIG.put as any).mockResolvedValue(undefined);
 
-      const config: Config = {
-        ...validConfig,
-        digest: { ...validConfig.digest, model: "any-custom-model" },
-      };
-
-      await saveConfig(env, config);
-
-      expect(env.CONFIG.put).toHaveBeenCalled();
+      await expect(saveConfig(env, DEFAULT_USER_CONFIG)).resolves.toBeUndefined();
     });
   });
 });

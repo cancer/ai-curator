@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { renderSettingsForm, handleSettingsUpdate } from "./settings";
 import type { Env } from "../index";
-import type { Config } from "../config";
+import { SYSTEM_CONFIG, type UserConfig } from "../config";
 
-function baseConfig(): Config {
+function baseUser(): UserConfig {
   return {
     interestAxes: [
       { id: "ai", label: "AI", seedText: "about ai" },
@@ -16,19 +16,12 @@ function baseConfig(): Config {
       mediumTagFeeds: ["golang"],
       fowlerFeed: true,
     },
-    scoring: {
-      weights: { interest: 0.6, freshness: 0.3, sourceTrust: 0.1 },
-      freshnessHalfLifeDays: 7,
-      semanticDedupThreshold: 0.9,
-      sourceTrust: { github: 1, fowler: 1, medium: 0.7, hn: 0.5 },
-    },
-    embedding: { model: "m", maxInputChars: 1000 },
-    digest: { model: "d", maxOutputTokens: 300 },
   };
 }
 
-function makeEnv(config: Config = baseConfig()) {
-  let stored = JSON.stringify(config);
+/** KV に何も無い（空）状態の Env。フォーム初期表示のフォールバック検証用。 */
+function makeEmptyEnv() {
+  let stored: string | null = null;
   const puts: string[] = [];
   const CONFIG = {
     get: async () => stored,
@@ -38,7 +31,29 @@ function makeEnv(config: Config = baseConfig()) {
     },
   };
   const env = { CONFIG, DB: {}, AI: {} } as unknown as Env;
-  return { env, puts, saved: () => JSON.parse(puts[puts.length - 1]) as Config };
+  return {
+    env,
+    puts,
+    saved: () => JSON.parse(puts[puts.length - 1]) as UserConfig,
+  };
+}
+
+function makeEnv(user: UserConfig = baseUser()) {
+  let stored: string | null = JSON.stringify(user);
+  const puts: string[] = [];
+  const CONFIG = {
+    get: async () => stored,
+    put: async (_k: string, v: string) => {
+      stored = v;
+      puts.push(v);
+    },
+  };
+  const env = { CONFIG, DB: {}, AI: {} } as unknown as Env;
+  return {
+    env,
+    puts,
+    saved: () => JSON.parse(puts[puts.length - 1]) as UserConfig,
+  };
 }
 
 function postForm(fields: Record<string, string>): Request {
@@ -73,8 +88,18 @@ describe("renderSettingsForm", () => {
     expect(html).toContain('method="post"');
     expect(html).toContain("about ai");
     expect(html).toContain("owner/repo");
-    // scoring は表示のみ（値が見えること）
-    expect(html).toContain("0.6");
+    // scoring は SYSTEM_CONFIG の値を表示のみ（値が見えること）
+    expect(html).toContain(String(SYSTEM_CONFIG.scoring.weights.interest));
+  });
+
+  it("opens with the default form even when KV is empty", async () => {
+    const { env } = makeEmptyEnv();
+    const res = await renderSettingsForm(env);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('method="post"');
+    // DEFAULT_USER_CONFIG の既定関心軸が初期表示される。
+    expect(html).toContain("software-design");
   });
 });
 
@@ -88,8 +113,19 @@ describe("handleSettingsUpdate", () => {
     expect(res.headers.get("location")).toBe("/settings");
     expect(puts.length).toBe(1);
     expect(saved().interestAxes[0].seedText).toBe("brand new seed");
-    // 変更不可の scoring/embedding/digest/fowlerFeed は元の値を保つ
-    expect(saved().scoring.weights.interest).toBe(0.6);
+    // KV には interestAxes / sources のみ書く（システム側は書かない）。
+    expect(Object.keys(saved()).sort()).toEqual(["interestAxes", "sources"]);
+    // フォーム外の fowlerFeed は元の値を保つ。
+    expect(saved().sources.fowlerFeed).toBe(true);
+  });
+
+  it("saves from the default form when KV is empty", async () => {
+    const { env, puts, saved } = makeEmptyEnv();
+    const res = await handleSettingsUpdate(env, postForm(validFields()));
+    expect(res.status).toBe(303);
+    expect(puts.length).toBe(1);
+    expect(Object.keys(saved()).sort()).toEqual(["interestAxes", "sources"]);
+    // フォームに無い fowlerFeed は DEFAULT_USER_CONFIG の値を引き継ぐ。
     expect(saved().sources.fowlerFeed).toBe(true);
   });
 
