@@ -119,12 +119,15 @@ UI からは変更しない。デプロイ前に以下の手順で選定値へ�
 Access 保護（§4）が済んだら、ブラウザで `/settings` を開く。
 
 1. 初回は KV が空でも、既定値（`DEFAULT_USER_CONFIG`）が入った状態でフォームが開く。
-2. 関心軸（label / seedText・追加/削除）とソース（GitHub リポジトリ / Medium 著者・タグ /
-   Hacker News 最低ポイント）を編集し、**保存**する。Worker が `saveConfig`（`src/config.ts`）で
-   KV キー `config:v1` に `interestAxes` / `sources` のみを書き込む。
+2. 関心軸（トピックの **label のみ**・追加/削除）とソース（**フィード URL リスト** /
+   GitHub リポジトリ / Hacker News 最低ポイント）を編集し、**保存**する。Worker が
+   `saveConfig`（`src/config.ts`）で KV キー `config:v1` に `interestAxes` / `sources` のみを
+   書き込む。関心記述文の手書きは不要（ベクトルは label から自動生成）。
 3. 以後の設定変更も同じく `/settings` から行う（設定変更の正の経路）。
 
-> `seedText` を変更すると、次回日次パスで関心軸ベクトルが自動再生成される。
+> 関心軸は **label（トピック名）だけ**入力する。関心記述文とベクトルは次回の日次パスが
+> label から LLM で生成→埋め込みして作る。label を変えると次回パスで再生成される。
+> Medium・martinfowler.com 等は「フィード URL」に追加する（専用欄は無い）。
 > scoring / embedding / digest は `/settings` では表示のみ（変更はコード編集）。
 
 ---
@@ -169,7 +172,7 @@ npx wrangler tail
 - [ ] 要約が自然な日本語である
 - [ ] `articles`・`feed_entries` のどこにも**記事本文が保存されていない**（`SELECT` で確認）
 - [ ] 未認証アクセスが Access でブロックされる（`/`・`/settings`・`/r/1` すべて）
-- [ ] スマホから設定画面でソース追加・関心軸 seedText 編集ができ、翌日フィードに反映される
+- [ ] スマホから設定画面でフィード URL 追加・関心軸ラベル編集ができ、翌日フィードに反映される
 - [ ] 記事リンクのクリックと 👍/👎 が `feedback` テーブルに記録される
 
 本文非保存の確認例（本番 D1 に対して）:

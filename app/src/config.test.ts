@@ -10,25 +10,16 @@ import {
 import type { Env } from "./index";
 
 // KV に置くのは interestAxes / sources のみ（ユーザー可変データ）。
+// 関心軸はラベルのみ（seedText は廃止）。sources は feeds/githubRepos/hnMinPoints。
 const validUser: UserConfig = {
   interestAxes: [
-    {
-      id: "web-fw",
-      label: "Web FW",
-      seedText: "I am interested in web frameworks",
-    },
-    {
-      id: "ai",
-      label: "AI",
-      seedText: "I am interested in AI",
-    },
+    { id: "web-fw", label: "Web フレームワーク" },
+    { id: "ai", label: "AI" },
   ],
   sources: {
+    feeds: ["https://martinfowler.com/feed.atom", "https://example.com/rss"],
     githubRepos: ["owner/repo1", "owner/repo2"],
     hnMinPoints: 50,
-    mediumAuthorFeeds: ["@author1"],
-    mediumTagFeeds: ["tag-name"],
-    fowlerFeed: true,
   },
 };
 
@@ -119,7 +110,7 @@ describe("config", () => {
       const env = createMockEnv();
       const user = {
         ...validUser,
-        interestAxes: [{ id: "", label: "Web FW", seedText: "text" }],
+        interestAxes: [{ id: "", label: "Web FW" }],
       };
       vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
@@ -132,7 +123,7 @@ describe("config", () => {
       const env = createMockEnv();
       const user = {
         ...validUser,
-        interestAxes: [{ id: "web-fw", label: "", seedText: "text" }],
+        interestAxes: [{ id: "web-fw", label: "" }],
       };
       vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
@@ -141,26 +132,13 @@ describe("config", () => {
       );
     });
 
-    it("throws when an interestAxis has an empty seedText", async () => {
-      const env = createMockEnv();
-      const user = {
-        ...validUser,
-        interestAxes: [{ id: "web-fw", label: "Web FW", seedText: "" }],
-      };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "InterestAxis.seedText must be a non-empty string",
-      );
-    });
-
     it("throws when interestAxes has duplicate ids", async () => {
       const env = createMockEnv();
       const user = {
         ...validUser,
         interestAxes: [
-          { id: "dup", label: "A", seedText: "a" },
-          { id: "dup", label: "B", seedText: "b" },
+          { id: "dup", label: "A" },
+          { id: "dup", label: "B" },
         ],
       };
       vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
@@ -177,6 +155,35 @@ describe("config", () => {
       vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
       await expect(loadConfig(env)).rejects.toThrow("sources must be an object");
+    });
+
+    it("throws when sources.feeds is not an array", async () => {
+      const env = createMockEnv();
+      const user = {
+        ...validUser,
+        sources: { ...validUser.sources, feeds: "not-array" },
+      };
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "sources.feeds must be an array",
+      );
+    });
+
+    it("throws when feeds has a non-URL entry", async () => {
+      const env = createMockEnv();
+      const user = {
+        ...validUser,
+        sources: {
+          ...validUser.sources,
+          feeds: ["https://ok.example/rss", "not a url"],
+        },
+      };
+      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
+
+      await expect(loadConfig(env)).rejects.toThrow(
+        "sources.feeds entries must be http(s):// URLs",
+      );
     });
 
     it("throws when sources.githubRepos is not an array", async () => {
@@ -233,33 +240,6 @@ describe("config", () => {
         "sources.hnMinPoints must be a non-negative integer",
       );
     });
-
-    it("throws when mediumTagFeeds has a non-string entry", async () => {
-      const env = createMockEnv();
-      const user = {
-        ...validUser,
-        sources: { ...validUser.sources, mediumTagFeeds: [true] },
-      };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.mediumTagFeeds entries must be strings",
-      );
-    });
-
-    it("throws when sources.fowlerFeed is missing", async () => {
-      const env = createMockEnv();
-      const user = {
-        ...validUser,
-        sources: { ...validUser.sources },
-      };
-      delete (user.sources as any).fowlerFeed;
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.fowlerFeed must be a boolean",
-      );
-    });
   });
 
   describe("saveConfig", () => {
@@ -296,11 +276,11 @@ describe("config", () => {
       const env = createMockEnv();
       const invalid = {
         ...validUser,
-        interestAxes: [{ id: "web-fw", label: "Web FW", seedText: "" }],
+        interestAxes: [{ id: "web-fw", label: "" }],
       };
 
       await expect(saveConfig(env, invalid as any)).rejects.toThrow(
-        "InterestAxis.seedText must be a non-empty string",
+        "InterestAxis.label must be a non-empty string",
       );
       expect(env.CONFIG.put).not.toHaveBeenCalled();
     });
@@ -313,9 +293,8 @@ describe("config", () => {
         ...validUser,
         sources: {
           ...validUser.sources,
+          feeds: [],
           githubRepos: [],
-          mediumAuthorFeeds: [],
-          mediumTagFeeds: [],
         },
       };
 

@@ -15,18 +15,25 @@ import type { Env } from "./index";
 /** GitHub リポジトリ指定の形式（owner/repo、スラッシュ・空白を含まない 2 要素）。 */
 const REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
 
+/**
+ * 関心軸。ユーザーはラベル（自然言語のトピック名）だけを与える。関心記述文と
+ * そのベクトルは日次パスが label から自動生成する（seedText は廃止）。id は不変
+ * キー（設定画面で新規軸に採番）で、ラベルを変えても過去の hit_axis/feed_trends が
+ * 孤立しないようにする。
+ */
 export interface InterestAxis {
   id: string;
   label: string;
-  seedText: string;
 }
 
+/**
+ * 取得ソース。feeds は任意の RSS/Atom フィード URL のリスト（汎用アダプタが処理）。
+ * 従来の medium/fowler 専用フィールドは feeds に統合した。
+ */
 export interface Sources {
+  feeds: string[];
   githubRepos: string[];
   hnMinPoints: number;
-  mediumAuthorFeeds: string[];
-  mediumTagFeeds: string[];
-  fowlerFeed: boolean;
 }
 
 export interface ScoringWeights {
@@ -35,11 +42,15 @@ export interface ScoringWeights {
   sourceTrust: number;
 }
 
+/**
+ * ソース種別ごとの信頼度。種別は source 文字列の `:` より前（`feed:{url}`→`feed`,
+ * `github:{owner/repo}`→`github`, `hn`→`hn`）。任意フィードは 1 本ずつ質を測れない
+ * ため feed でひとまとめにする。
+ */
 export interface SourceTrustScores {
   github: number;
-  fowler: number;
-  medium: number;
   hn: number;
+  feed: number;
 }
 
 export interface ScoringConfig {
@@ -94,9 +105,8 @@ export const SYSTEM_CONFIG: SystemConfig = {
     semanticDedupThreshold: 0.9,
     sourceTrust: {
       github: 1.0,
-      fowler: 1.0,
-      medium: 0.7,
       hn: 0.5,
+      feed: 0.7,
     },
   },
   embedding: {
@@ -111,47 +121,28 @@ export const SYSTEM_CONFIG: SystemConfig = {
 
 /**
  * 初回 `GET /settings` のフォーム初期表示用の既定 UserConfig。
- * seedText は英語で書く（対象記事が英語中心のため関心軸も英語で揃える）。
+ * 関心軸はラベル（トピック名）のみ。関心記述文とベクトルは日次パスが自動生成する。
  * 保存されるまで KV には入らない（フォームの雛形）。
  */
 export const DEFAULT_USER_CONFIG: UserConfig = {
   interestAxes: [
-    {
-      id: "web-fw",
-      label: "Web フレームワーク",
-      seedText:
-        "Modern web frameworks and their runtime and rendering architecture: React, Next.js, Remix, Svelte, SvelteKit, Vue, Nuxt, Astro, Qwik, SolidJS. Server components, streaming SSR, hydration, islands architecture, edge rendering, routing, and build tooling.",
-    },
-    {
-      id: "ai",
-      label: "AI / 機械学習",
-      seedText:
-        "Applied AI and machine learning engineering: large language models, embeddings, retrieval-augmented generation, vector search, fine-tuning, inference optimization, prompt engineering, evaluation, and integrating model APIs into production software.",
-    },
-    {
-      id: "agentic-coding",
-      label: "エージェント型コーディング",
-      seedText:
-        "Agentic coding and AI-assisted software development: autonomous coding agents, LLM tool use and function calling, code generation, AI pair programming, developer copilots, agent orchestration, and workflows where models plan and edit code.",
-    },
-    {
-      id: "software-design",
-      label: "ソフトウェア設計",
-      seedText:
-        "Software design and architecture: clean architecture, domain-driven design, refactoring, design patterns, testing strategy, API design, modularity, coupling and cohesion, maintainability, and engineering practices that reduce cognitive load.",
-    },
+    { id: "web-fw", label: "Web フレームワーク" },
+    { id: "ai", label: "AI" },
+    { id: "agentic-coding", label: "Agentic Coding" },
+    { id: "software-design", label: "Software Design" },
   ],
   sources: {
+    feeds: [
+      "https://martinfowler.com/feed.atom",
+      "https://medium.com/feed/@examplauthor",
+    ],
     githubRepos: ["facebook/react", "withastro/astro"],
     hnMinPoints: 50,
-    mediumAuthorFeeds: [],
-    mediumTagFeeds: ["software-engineering", "artificial-intelligence"],
-    fowlerFeed: true,
   },
 };
 
 /**
- * Validate InterestAxis
+ * Validate InterestAxis（id 非空・label 非空。seedText は廃止）。
  */
 function validateInterestAxis(axis: unknown): InterestAxis {
   if (!axis || typeof axis !== "object") {
@@ -168,19 +159,25 @@ function validateInterestAxis(axis: unknown): InterestAxis {
     throw new Error("InterestAxis.label must be a non-empty string");
   }
 
-  if (typeof obj.seedText !== "string" || obj.seedText.trim() === "") {
-    throw new Error("InterestAxis.seedText must be a non-empty string");
-  }
-
   return {
     id: obj.id,
     label: obj.label,
-    seedText: obj.seedText,
   };
 }
 
+/** http(s):// で始まる URL か（feeds 要素の検証用）。 */
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Validate Sources
+ * Validate Sources（feeds は http(s) URL・githubRepos は owner/repo・
+ * hnMinPoints は非負整数）。
  */
 function validateSources(sources: unknown): Sources {
   if (!sources || typeof sources !== "object") {
@@ -188,6 +185,18 @@ function validateSources(sources: unknown): Sources {
   }
 
   const obj = sources as Record<string, unknown>;
+
+  if (!Array.isArray(obj.feeds)) {
+    throw new Error("sources.feeds must be an array");
+  }
+
+  for (const feed of obj.feeds) {
+    if (typeof feed !== "string" || !isHttpUrl(feed)) {
+      throw new Error(
+        `sources.feeds entries must be http(s):// URLs: ${JSON.stringify(feed)}`
+      );
+    }
+  }
 
   if (!Array.isArray(obj.githubRepos)) {
     throw new Error("sources.githubRepos must be an array");
@@ -209,36 +218,10 @@ function validateSources(sources: unknown): Sources {
     throw new Error("sources.hnMinPoints must be a non-negative integer");
   }
 
-  if (!Array.isArray(obj.mediumAuthorFeeds)) {
-    throw new Error("sources.mediumAuthorFeeds must be an array");
-  }
-
-  for (const feed of obj.mediumAuthorFeeds) {
-    if (typeof feed !== "string") {
-      throw new Error("sources.mediumAuthorFeeds entries must be strings");
-    }
-  }
-
-  if (!Array.isArray(obj.mediumTagFeeds)) {
-    throw new Error("sources.mediumTagFeeds must be an array");
-  }
-
-  for (const feed of obj.mediumTagFeeds) {
-    if (typeof feed !== "string") {
-      throw new Error("sources.mediumTagFeeds entries must be strings");
-    }
-  }
-
-  if (typeof obj.fowlerFeed !== "boolean") {
-    throw new Error("sources.fowlerFeed must be a boolean");
-  }
-
   return {
+    feeds: obj.feeds as string[],
     githubRepos: obj.githubRepos as string[],
     hnMinPoints: obj.hnMinPoints,
-    mediumAuthorFeeds: obj.mediumAuthorFeeds as string[],
-    mediumTagFeeds: obj.mediumTagFeeds as string[],
-    fowlerFeed: obj.fowlerFeed,
   };
 }
 

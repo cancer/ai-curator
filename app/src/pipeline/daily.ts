@@ -42,23 +42,13 @@ import {
 } from "../lib/summarize";
 import { fetchReleases } from "../adapters/github";
 import { fetchStories, fetchArticleBody as fetchHnArticleBody } from "../adapters/hn";
-import { fetchAuthorFeed, fetchTagFeed } from "../adapters/medium";
-import {
-  fetchFowlerFeed,
-  fetchArticleBody as fetchFowlerArticleBody,
-} from "../adapters/fowler";
+import { fetchFeed, resolveFeedBody } from "../adapters/feed";
 
 /** 当日ウィンドウの長さ（時間）。下限 = 実行時刻 - この時間。 */
 const WINDOW_HOURS = 24;
 
 /** embedding 呼び出しの間隔（レート制御）。 */
 const EMBED_SPACING_MS = 150;
-
-/**
- * fowler 記事ページの連続 fetch に空ける最小間隔（計画タスク 5(d)
- * 「連続アクセスは 1 秒以上間隔を空ける」）。fowler 以外のソースには不要。
- */
-const FOWLER_ARTICLE_SPACING_MS = 1000;
 
 /**
  * 各ソースの当日分を取得する関数群（テストで差し替え可能にするため注入する）。
@@ -71,32 +61,35 @@ export interface Fetchers {
     windowStart: Date,
   ): Promise<NormalizedArticle[]>;
   fetchStories(minPoints: number, windowStart: Date): Promise<NormalizedArticle[]>;
-  fetchAuthorFeed(author: string, windowStart: Date): Promise<NormalizedArticle[]>;
-  fetchTagFeed(tag: string, windowStart: Date): Promise<NormalizedArticle[]>;
-  fetchFowlerFeed(windowStart: Date): Promise<NormalizedArticle[]>;
+  /** 汎用 RSS/Atom フィード。任意の feed URL を扱う。 */
+  fetchFeed(feedUrl: string, windowStart: Date): Promise<NormalizedArticle[]>;
 }
 
 const defaultFetchers: Fetchers = {
   fetchReleases: (owner, repo, windowStart) =>
     fetchReleases(owner, repo, windowStart),
   fetchStories: (minPoints, windowStart) => fetchStories(minPoints, windowStart),
-  fetchAuthorFeed: (author, windowStart) => fetchAuthorFeed(author, windowStart),
-  fetchTagFeed: (tag, windowStart) => fetchTagFeed(tag, windowStart),
-  fetchFowlerFeed: (windowStart) => fetchFowlerFeed(windowStart),
+  fetchFeed: (feedUrl, windowStart) => fetchFeed(feedUrl, windowStart),
 };
 
 /**
- * 要約段でリンク先/記事ページ本文を取得する関数群（テストで差し替え可能）。
- * github の release note と medium 著者本文はメモリにあるためここには含めない
- * （前段でメモリ保持した body を使う）。
+ * 要約段で本文を解決する関数群（テストで差し替え可能）。
+ * github の release note とフィードのインライン本文はメモリにあるためここでは扱わず、
+ * 前段でメモリ保持した body を使う。ここに来るのは:
+ * - feed: インライン本文が無い記事（feedSummary or リンク先の粗抽出に落ちる）
+ * - hn: 外部リンク先の粗抽出
  */
 export interface BodyFetchers {
-  fetchFowlerBody(url: string): Promise<string>;
+  resolveFeedBody(article: {
+    url: string;
+    feedSummary?: string;
+    body?: string;
+  }): Promise<string | null>;
   fetchHnBody(url: string): Promise<string>;
 }
 
 const defaultBodyFetchers: BodyFetchers = {
-  fetchFowlerBody: (url) => fetchFowlerArticleBody(url),
+  resolveFeedBody: (article) => resolveFeedBody(article),
   fetchHnBody: (url) => fetchHnArticleBody(url),
 };
 
@@ -140,25 +133,10 @@ export function buildSourceTasks(
     fetch: () => fetchers.fetchStories(sources.hnMinPoints, windowStart),
   });
 
-  for (const feed of sources.mediumAuthorFeeds) {
-    const author = feed.replace(/^@/, "");
+  for (const feedUrl of sources.feeds) {
     tasks.push({
-      label: `medium:@${author}`,
-      fetch: () => fetchers.fetchAuthorFeed(author, windowStart),
-    });
-  }
-
-  for (const tag of sources.mediumTagFeeds) {
-    tasks.push({
-      label: `medium:tag/${tag}`,
-      fetch: () => fetchers.fetchTagFeed(tag, windowStart),
-    });
-  }
-
-  if (sources.fowlerFeed) {
-    tasks.push({
-      label: "fowler",
-      fetch: () => fetchers.fetchFowlerFeed(windowStart),
+      label: `feed:${feedUrl}`,
+      fetch: () => fetchers.fetchFeed(feedUrl, windowStart),
     });
   }
 
@@ -242,25 +220,27 @@ function isHackerNewsItemUrl(url: string): boolean {
 export function makeBodyResolver(
   memById: Map<number, { body: string | null }>,
   bodyFetchers: BodyFetchers,
-  sleep: (ms: number) => Promise<void>,
 ): (target: SummaryTarget) => Promise<string | null> {
-  let fowlerFetched = false;
   return async (target) => {
     const memory = memById.get(target.articleId);
     if (memory?.body) {
       return memory.body;
     }
 
-    if (target.source === "fowler") {
-      if (fowlerFetched) {
-        await sleep(FOWLER_ARTICLE_SPACING_MS);
-      }
-      fowlerFetched = true;
-      const body = await bodyFetchers.fetchFowlerBody(target.url);
-      return body === "" ? null : body;
+    // source は `feed:{url}` / `github:{owner/repo}` / `hn`。`:` より前が種別。
+    const kind = target.source.split(":")[0];
+
+    if (kind === "feed") {
+      // インライン本文はメモリで処理済み。feedSummary があればそれ、無ければ
+      // リンク先を粗抽出（resolveFeedBody 内で判断）。
+      return bodyFetchers.resolveFeedBody({
+        url: target.url,
+        feedSummary: target.feedSummary ?? undefined,
+      });
     }
 
-    if (target.source === "hn") {
+    if (kind === "hn") {
+      // self-post（item ページ）は外部本文が無いので story_text→title に落とす。
       if (isHackerNewsItemUrl(target.url)) {
         return null;
       }
@@ -347,8 +327,15 @@ export async function runDaily(env: Env, deps: DailyDeps = {}): Promise<void> {
     inserted += result.meta?.changes ?? 0;
   }
 
-  // 4. 関心軸同期（seed 変更・モデル変更を検知して upsert）。
-  await sync(db, env.AI, config.interestAxes, config.embedding.model);
+  // 4. 関心軸同期（label 変更・モデル変更を検知して LLM 生成→埋め込みで upsert）。
+  await sync(
+    db,
+    env.AI,
+    config.interestAxes,
+    config.embedding.model,
+    config.digest.model,
+    sleep,
+  );
 
   // 5. 対象記事ロード（過去 24h の記事全体 = 当日記事）。
   const rows =
@@ -492,7 +479,7 @@ export async function runDaily(env: Env, deps: DailyDeps = {}): Promise<void> {
     env.AI,
     config.digest,
     targets,
-    makeBodyResolver(memById, bodyFetchers, sleep),
+    makeBodyResolver(memById, bodyFetchers),
     sleep,
   );
   for (const [articleId, summary] of summaries) {

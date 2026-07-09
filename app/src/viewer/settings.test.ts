@@ -6,15 +6,13 @@ import { SYSTEM_CONFIG, type UserConfig } from "../config";
 function baseUser(): UserConfig {
   return {
     interestAxes: [
-      { id: "ai", label: "AI", seedText: "about ai" },
-      { id: "web-fw", label: "Web FW", seedText: "about web" },
+      { id: "ai", label: "AI" },
+      { id: "web-fw", label: "Web FW" },
     ],
     sources: {
+      feeds: ["https://martinfowler.com/feed.atom"],
       githubRepos: ["owner/repo"],
       hnMinPoints: 10,
-      mediumAuthorFeeds: ["@alice"],
-      mediumTagFeeds: ["golang"],
-      fowlerFeed: true,
     },
   };
 }
@@ -64,17 +62,15 @@ function postForm(fields: Record<string, string>): Request {
 }
 
 // 2 軸 + ソースの妥当なフォーム値。テストごとに一部を差し替える。
+// 関心軸はラベルのみ入力（seedText 廃止）。既存軸は hidden id を round-trip する。
 function validFields(): Record<string, string> {
   return {
     "axis-0-id": "ai",
     "axis-0-label": "AI",
-    "axis-0-seedText": "about ai",
     "axis-1-id": "web-fw",
     "axis-1-label": "Web FW",
-    "axis-1-seedText": "about web",
+    feeds: "https://martinfowler.com/feed.atom",
     githubRepos: "owner/repo",
-    mediumAuthorFeeds: "@alice",
-    mediumTagFeeds: "golang",
     hnMinPoints: "10",
   };
 }
@@ -86,7 +82,7 @@ describe("renderSettingsForm", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain('method="post"');
-    expect(html).toContain("about ai");
+    expect(html).toContain("martinfowler.com/feed.atom");
     expect(html).toContain("owner/repo");
     // scoring は SYSTEM_CONFIG の値を表示のみ（値が見えること）
     expect(html).toContain(String(SYSTEM_CONFIG.scoring.weights.interest));
@@ -98,7 +94,7 @@ describe("renderSettingsForm", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain('method="post"');
-    // DEFAULT_USER_CONFIG の既定関心軸が初期表示される。
+    // DEFAULT_USER_CONFIG の既定関心軸（hidden id）が初期表示される。
     expect(html).toContain("software-design");
   });
 
@@ -126,16 +122,22 @@ describe("handleSettingsUpdate", () => {
   it("saves valid input and redirects 303 to /settings", async () => {
     const { env, puts, saved } = makeEnv();
     const fields = validFields();
-    fields["axis-0-seedText"] = "brand new seed";
+    fields["axis-0-label"] = "brand new label";
     const res = await handleSettingsUpdate(env, postForm(fields));
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/settings");
     expect(puts.length).toBe(1);
-    expect(saved().interestAxes[0].seedText).toBe("brand new seed");
+    expect(saved().interestAxes[0].label).toBe("brand new label");
+    // 既存軸の id は hidden で round-trip され保持される。
+    expect(saved().interestAxes[0].id).toBe("ai");
     // KV には interestAxes / sources のみ書く（システム側は書かない）。
     expect(Object.keys(saved()).sort()).toEqual(["interestAxes", "sources"]);
-    // フォーム外の fowlerFeed は元の値を保つ。
-    expect(saved().sources.fowlerFeed).toBe(true);
+    // sources は feeds/githubRepos/hnMinPoints のみ。
+    expect(Object.keys(saved().sources).sort()).toEqual([
+      "feeds",
+      "githubRepos",
+      "hnMinPoints",
+    ]);
   });
 
   it("saves from the default form when KV is empty", async () => {
@@ -144,19 +146,24 @@ describe("handleSettingsUpdate", () => {
     expect(res.status).toBe(303);
     expect(puts.length).toBe(1);
     expect(Object.keys(saved()).sort()).toEqual(["interestAxes", "sources"]);
-    // フォームに無い fowlerFeed は DEFAULT_USER_CONFIG の値を引き継ぐ。
-    expect(saved().sources.fowlerFeed).toBe(true);
+    expect(saved().sources.feeds).toEqual([
+      "https://martinfowler.com/feed.atom",
+    ]);
   });
 
-  it("adds a new axis from the blank add-row", async () => {
+  it("assigns a fresh id to a new axis added from the blank add-row", async () => {
     const { env, saved } = makeEnv();
     const fields = validFields();
-    fields["axis-2-id"] = "new-axis";
-    fields["axis-2-label"] = "New";
-    fields["axis-2-seedText"] = "new seed";
+    // 追加行はラベルのみ（id は入力させない。保存時に採番）。
+    fields["axis-2-label"] = "New Topic";
     const res = await handleSettingsUpdate(env, postForm(fields));
     expect(res.status).toBe(303);
-    expect(saved().interestAxes.map((a) => a.id)).toContain("new-axis");
+    const added = saved().interestAxes.find((a) => a.label === "New Topic");
+    expect(added).toBeDefined();
+    expect(added!.id).toBeTruthy();
+    // 既存 id と衝突しない新規 id が採番される。
+    expect(added!.id).not.toBe("ai");
+    expect(added!.id).not.toBe("web-fw");
   });
 
   it("deletes an axis whose delete checkbox is set", async () => {
@@ -178,19 +185,21 @@ describe("handleSettingsUpdate", () => {
     expect(html).toContain("not-a-valid-repo");
   });
 
-  it("rejects an empty seedText with 400", async () => {
+  it("rejects an invalid feed URL with 400 and preserves input", async () => {
     const { env, puts } = makeEnv();
     const fields = validFields();
-    fields["axis-0-seedText"] = "   ";
+    fields.feeds = "not a url";
     const res = await handleSettingsUpdate(env, postForm(fields));
     expect(res.status).toBe(400);
     expect(puts.length).toBe(0);
+    const html = await res.text();
+    expect(html).toContain("not a url");
   });
 
-  it("rejects an invalid axis id with 400", async () => {
+  it("rejects an empty label with 400", async () => {
     const { env, puts } = makeEnv();
     const fields = validFields();
-    fields["axis-0-id"] = "Bad_ID";
+    fields["axis-0-label"] = "   ";
     const res = await handleSettingsUpdate(env, postForm(fields));
     expect(res.status).toBe(400);
     expect(puts.length).toBe(0);

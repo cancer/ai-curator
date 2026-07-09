@@ -16,21 +16,19 @@ import type { SummaryTarget } from "../lib/summarize";
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     interestAxes: [
-      { id: "ai", label: "AI", seedText: "ai" },
-      { id: "web", label: "Web", seedText: "web" },
+      { id: "ai", label: "AI" },
+      { id: "web", label: "Web" },
     ],
     sources: {
+      feeds: [],
       githubRepos: [],
       hnMinPoints: 0,
-      mediumAuthorFeeds: [],
-      mediumTagFeeds: [],
-      fowlerFeed: false,
     },
     scoring: {
       weights: { interest: 0.6, freshness: 0.3, sourceTrust: 0.1 },
       freshnessHalfLifeDays: 7,
       semanticDedupThreshold: 0.9,
-      sourceTrust: { github: 1.0, fowler: 0.9, medium: 0.6, hn: 0.4 },
+      sourceTrust: { github: 1.0, hn: 0.4, feed: 0.7 },
     },
     embedding: { model: "m", maxInputChars: 1000 },
     digest: { model: "d", maxOutputTokens: 300 },
@@ -153,14 +151,12 @@ function emptyFetchers(): Fetchers {
   return {
     fetchReleases: vi.fn(async () => []),
     fetchStories: vi.fn(async () => []),
-    fetchAuthorFeed: vi.fn(async () => []),
-    fetchTagFeed: vi.fn(async () => []),
-    fetchFowlerFeed: vi.fn(async () => []),
+    fetchFeed: vi.fn(async () => []),
   };
 }
 
 const noBodyFetchers: BodyFetchers = {
-  fetchFowlerBody: async () => "",
+  resolveFeedBody: async () => null,
   fetchHnBody: async () => "",
 };
 
@@ -173,24 +169,22 @@ describe("buildSourceTasks", () => {
     const windowStart = new Date("2026-07-08T00:00:00.000Z");
     const config = makeConfig({
       sources: {
+        feeds: ["https://a.example/rss", "https://b.example/atom"],
         githubRepos: ["owner/repo1"],
         hnMinPoints: 50,
-        mediumAuthorFeeds: ["@author1"],
-        mediumTagFeeds: ["tag-name"],
-        fowlerFeed: true,
       },
     });
     const fetchers = emptyFetchers();
 
     const tasks = buildSourceTasks(config, fetchers, windowStart);
-    expect(tasks).toHaveLength(5);
+    // 1 github + 1 hn + 2 feeds = 4
+    expect(tasks).toHaveLength(4);
     for (const task of tasks) task.fetch();
 
     expect(fetchers.fetchReleases).toHaveBeenCalledWith("owner", "repo1", windowStart);
     expect(fetchers.fetchStories).toHaveBeenCalledWith(50, windowStart);
-    expect(fetchers.fetchAuthorFeed).toHaveBeenCalledWith("author1", windowStart);
-    expect(fetchers.fetchTagFeed).toHaveBeenCalledWith("tag-name", windowStart);
-    expect(fetchers.fetchFowlerFeed).toHaveBeenCalledWith(windowStart);
+    expect(fetchers.fetchFeed).toHaveBeenCalledWith("https://a.example/rss", windowStart);
+    expect(fetchers.fetchFeed).toHaveBeenCalledWith("https://b.example/atom", windowStart);
   });
 });
 
@@ -206,46 +200,40 @@ describe("makeBodyResolver", () => {
     };
   }
 
-  it("uses in-memory body without fetching (github/medium bodies)", async () => {
-    const fetchFowlerBody = vi.fn(async () => "should-not-be-called");
+  it("uses in-memory body without fetching (github release note / feed inline content)", async () => {
+    const resolveFeedBody = vi.fn(async () => "should-not-be-called");
     const fetchHnBody = vi.fn(async () => "should-not-be-called");
     const memById = new Map([[7, { body: "MEMORY_BODY" }]]);
-    const resolve = makeBodyResolver(memById, { fetchFowlerBody, fetchHnBody }, noSleep);
+    const resolve = makeBodyResolver(memById, { resolveFeedBody, fetchHnBody });
 
     const body = await resolve(target({ articleId: 7, source: "github:o/r" }));
 
     expect(body).toBe("MEMORY_BODY");
-    expect(fetchFowlerBody).not.toHaveBeenCalled();
+    expect(resolveFeedBody).not.toHaveBeenCalled();
     expect(fetchHnBody).not.toHaveBeenCalled();
   });
 
-  it("spaces consecutive fowler article fetches by >=1000ms (not before the first)", async () => {
-    const sleepCalls: number[] = [];
-    const sleep = async (ms: number) => {
-      sleepCalls.push(ms);
-    };
-    const fetchFowlerBody = vi.fn(async () => "body");
-    const resolve = makeBodyResolver(
-      new Map(),
-      { fetchFowlerBody, fetchHnBody: async () => "" },
-      sleep,
+  it("resolves feed articles via resolveFeedBody when no in-memory body", async () => {
+    const resolveFeedBody = vi.fn(async () => "FEED_BODY");
+    const resolve = makeBodyResolver(new Map(), {
+      resolveFeedBody,
+      fetchHnBody: async () => "",
+    });
+
+    const body = await resolve(
+      target({ source: "feed:https://x.example/rss", url: "https://x.example/a" }),
     );
 
-    await resolve(target({ source: "fowler", url: "https://martinfowler.com/a" }));
-    await resolve(target({ source: "fowler", url: "https://martinfowler.com/b" }));
-    await resolve(target({ source: "fowler", url: "https://martinfowler.com/c" }));
-
-    expect(sleepCalls).toEqual([1000, 1000]);
-    expect(fetchFowlerBody).toHaveBeenCalledTimes(3);
+    expect(body).toBe("FEED_BODY");
+    expect(resolveFeedBody).toHaveBeenCalledTimes(1);
   });
 
   it("fetches the external link for hn but skips self-post item pages", async () => {
     const fetchHnBody = vi.fn(async () => "EXTERNAL_BODY");
-    const resolve = makeBodyResolver(
-      new Map(),
-      { fetchFowlerBody: async () => "", fetchHnBody },
-      noSleep,
-    );
+    const resolve = makeBodyResolver(new Map(), {
+      resolveFeedBody: async () => null,
+      fetchHnBody,
+    });
 
     const external = await resolve(
       target({ source: "hn", url: "https://example.invalid/post" }),
@@ -260,11 +248,10 @@ describe("makeBodyResolver", () => {
   });
 
   it("returns null when a link fetch yields empty (falls back downstream)", async () => {
-    const resolve = makeBodyResolver(
-      new Map(),
-      { fetchFowlerBody: async () => "", fetchHnBody: async () => "" },
-      noSleep,
-    );
+    const resolve = makeBodyResolver(new Map(), {
+      resolveFeedBody: async () => null,
+      fetchHnBody: async () => "",
+    });
     const body = await resolve(
       target({ source: "hn", url: "https://example.invalid/x" }),
     );
@@ -294,11 +281,11 @@ describe("runDaily — single pass orchestration", () => {
         feedSummary: "a self post about testing fictional widgets",
       }),
     ]);
-    fetchers.fetchAuthorFeed = vi.fn(async () => [
+    fetchers.fetchFeed = vi.fn(async () => [
       normalized({
         url: "u2",
         title: "Why my pretend cache never warms up",
-        source: "medium:@alice",
+        source: "feed:https://feed.example/rss",
         feedSummary: "notes on invented cache warming strategies",
         body: "BODY2",
       }),
@@ -316,7 +303,7 @@ describe("runDaily — single pass orchestration", () => {
     // Working set (what the DB returns after insert): the three fetched articles.
     const workingSet = [
       row({ id: 1, title: "t1", source: "hn", url: "u1" }),
-      row({ id: 2, title: "t2", source: "medium:@alice", url: "u2" }),
+      row({ id: 2, title: "t2", source: "feed:https://feed.example/rss", url: "u2" }),
       row({ id: 3, title: "t3", source: "github:o/r", url: "u3" }),
     ];
     const axes: AxisRow[] = [
@@ -338,17 +325,15 @@ describe("runDaily — single pass orchestration", () => {
       db: db as unknown as D1Database,
       fetchers,
       bodyFetchers: {
-        fetchFowlerBody: async () => "should-not-be-called",
+        resolveFeedBody: async () => "should-not-be-called",
         fetchHnBody: async () => "HN_LINK_BODY",
       },
       loadConfig: async () =>
         makeConfig({
           sources: {
+            feeds: ["https://feed.example/rss"],
             githubRepos: ["o/r"],
             hnMinPoints: 0,
-            mediumAuthorFeeds: ["@alice"],
-            mediumTagFeeds: [],
-            fowlerFeed: false,
           },
         }),
       syncInterestAxes: vi.fn(async () => {}),
@@ -425,17 +410,15 @@ describe("runDaily — single pass orchestration", () => {
       db: db as unknown as D1Database,
       fetchers,
       bodyFetchers: {
-        fetchFowlerBody: async () => "SENTINEL_BODY",
+        resolveFeedBody: async () => "SENTINEL_BODY",
         fetchHnBody: async () => "SENTINEL_BODY",
       },
       loadConfig: async () =>
         makeConfig({
           sources: {
+            feeds: [],
             githubRepos: [],
             hnMinPoints: 0,
-            mediumAuthorFeeds: [],
-            mediumTagFeeds: [],
-            fowlerFeed: false,
           },
         }),
       syncInterestAxes: vi.fn(async () => {}),
@@ -579,11 +562,9 @@ describe("runDaily — single pass orchestration", () => {
         loadConfig: async () =>
           makeConfig({
             sources: {
+              feeds: [],
               githubRepos: [],
               hnMinPoints: 0,
-              mediumAuthorFeeds: [],
-              mediumTagFeeds: [],
-              fowlerFeed: false,
             },
           }),
         syncInterestAxes: vi.fn(async () => {}),

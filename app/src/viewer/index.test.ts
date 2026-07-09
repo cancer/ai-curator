@@ -23,21 +23,19 @@ interface TrendRow {
 function baseConfig(): Config {
   return {
     interestAxes: [
-      { id: "ai", label: "AI関連", seedText: "ai" },
-      { id: "web-fw", label: "Web FW", seedText: "web" },
+      { id: "ai", label: "AI関連" },
+      { id: "web-fw", label: "Web FW" },
     ],
     sources: {
+      feeds: [],
       githubRepos: [],
       hnMinPoints: 10,
-      mediumAuthorFeeds: [],
-      mediumTagFeeds: [],
-      fowlerFeed: false,
     },
     scoring: {
       weights: { interest: 0.6, freshness: 0.3, sourceTrust: 0.1 },
       freshnessHalfLifeDays: 7,
       semanticDedupThreshold: 0.9,
-      sourceTrust: { github: 1, fowler: 1, medium: 0.7, hn: 0.5 },
+      sourceTrust: { github: 1, hn: 0.5, feed: 0.7 },
     },
     embedding: { model: "m", maxInputChars: 1000 },
     digest: { model: "d", maxOutputTokens: 300 },

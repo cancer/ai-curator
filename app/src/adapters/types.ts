@@ -14,7 +14,10 @@ export interface NormalizedArticle {
   /** normalizeUrl 済みの URL */
   url: string;
   title: string;
-  /** ソース識別子（例: `github:owner/repo`, `hn`, `medium:@author`, `fowler`） */
+  /**
+   * ソース識別子（例: `feed:{url}`, `github:{owner/repo}`, `hn`）。
+   * sourceTrust は `:` より前で引く（`feed:https://...`→`feed`）。
+   */
   source: string;
   /** ISO 8601 */
   publishedAt: string;
