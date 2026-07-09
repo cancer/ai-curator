@@ -101,6 +101,25 @@ describe("renderSettingsForm", () => {
     // DEFAULT_USER_CONFIG の既定関心軸が初期表示される。
     expect(html).toContain("software-design");
   });
+
+  it("renders a run-now button that posts to /run", async () => {
+    const { env } = makeEnv();
+    const html = await (await renderSettingsForm(env)).text();
+    expect(html).toContain('action="/run"');
+    expect(html).toContain("今すぐ日次パスを実行");
+  });
+
+  it("omits the started note by default", async () => {
+    const { env } = makeEnv();
+    const html = await (await renderSettingsForm(env)).text();
+    expect(html).not.toContain("実行を開始しました");
+  });
+
+  it("shows a started note when ran=1", async () => {
+    const { env } = makeEnv();
+    const html = await (await renderSettingsForm(env, true)).text();
+    expect(html).toContain("実行を開始しました");
+  });
 });
 
 describe("handleSettingsUpdate", () => {

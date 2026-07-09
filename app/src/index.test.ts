@@ -79,4 +79,21 @@ describe("fetch router", () => {
     const res = await worker.fetch!(req("/nope"), env, ctx);
     expect(res.status).toBe(404);
   });
+
+  it("POST /run kicks off runDaily via waitUntil and redirects", async () => {
+    const { env } = makeEnv();
+    let captured: Promise<unknown> | undefined;
+    // waitUntil に渡された promise を捕捉し、reject は握り潰す（stub env で
+    // runDaily は load(env) 段階で落ちるが、それは検証対象ではない）。
+    const runCtx = {
+      waitUntil: (p: Promise<unknown>) => {
+        captured = p;
+        p.catch(() => {});
+      },
+    } as unknown as ExecutionContext;
+    const res = await worker.fetch!(req("/run", { method: "POST" }), env, runCtx);
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/settings?ran=1");
+    expect(captured).toBeInstanceOf(Promise);
+  });
 });

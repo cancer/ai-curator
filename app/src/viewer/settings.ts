@@ -169,6 +169,7 @@ function renderForm(
   scoring: ScoringConfig,
   lockedIds: Set<string>,
   errors: string[],
+  ran: boolean,
 ): string {
   const errorHtml =
     errors.length === 0
@@ -176,6 +177,17 @@ function renderForm(
       : `<ul class="error">${errors
           .map((e) => `<li>${escapeHtml(e)}</li>`)
           .join("")}</ul>`;
+
+  // 手動実行の注記は POST /run 直後（?ran=1）のみ出す。
+  const ranNote = ran
+    ? `<p class="note">実行を開始しました（結果はフィードに反映。詳細ログは wrangler tail）。</p>`
+    : "";
+
+  // 日次パスの手動実行ボタン。設定保存フォームとは別 form にして送信が混ざらないようにする。
+  const runForm =
+    `<form method="post" action="/run">` +
+    `<button type="submit">今すぐ日次パスを実行</button>` +
+    `</form>`;
 
   // 既存軸 + 追加用の空行を 1 つ描画する。
   const axisFields = [...model.axes, { id: "", label: "", seedText: "" }]
@@ -195,6 +207,9 @@ function renderForm(
   const body =
     `<h1>設定</h1>` +
     `<p><a href="/">フィードへ戻る</a></p>` +
+    ranNote +
+    `<h2>手動実行</h2>` +
+    runForm +
     errorHtml +
     `<form method="post" action="/settings">` +
     `<h2>関心軸</h2>` +
@@ -216,12 +231,24 @@ function renderForm(
   return page("設定", body);
 }
 
-/** `GET /settings`: KV の UserConfig（空なら既定）をフォーム表示する。 */
-export async function renderSettingsForm(env: Env): Promise<Response> {
+/**
+ * `GET /settings`: KV の UserConfig（空なら既定）をフォーム表示する。
+ * `ran` は POST /run 直後（?ran=1）に手動実行の注記を出すためのフラグ。
+ */
+export async function renderSettingsForm(
+  env: Env,
+  ran = false,
+): Promise<Response> {
   const user = await loadUserConfigForForm(env);
   const lockedIds = new Set(user.interestAxes.map((a) => a.id));
   return htmlResponse(
-    renderForm(modelFromUserConfig(user), SYSTEM_CONFIG.scoring, lockedIds, []),
+    renderForm(
+      modelFromUserConfig(user),
+      SYSTEM_CONFIG.scoring,
+      lockedIds,
+      [],
+      ran,
+    ),
   );
 }
 
@@ -250,7 +277,7 @@ export async function handleSettingsUpdate(
   }
 
   return htmlResponse(
-    renderForm(model, SYSTEM_CONFIG.scoring, lockedIds, errors),
+    renderForm(model, SYSTEM_CONFIG.scoring, lockedIds, errors, false),
     400,
   );
 }
