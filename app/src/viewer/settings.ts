@@ -142,7 +142,7 @@ function renderForm(
   model: FormModel,
   scoring: ScoringConfig,
   errors: string[],
-  ran: boolean,
+  runId: string | null,
 ): string {
   const errorHtml =
     errors.length === 0
@@ -151,10 +151,13 @@ function renderForm(
           .map((e) => `<li>${escapeHtml(e)}</li>`)
           .join("")}</ul>`;
 
-  // 手動実行の注記は POST /run 直後（?ran=1）のみ出す。
-  const ranNote = ran
-    ? `<p class="note">実行を開始しました（結果はフィードに反映。詳細ログは wrangler tail）。</p>`
-    : "";
+  // 手動実行の注記は POST /run 直後（?run=<instanceId>）のみ出す。実行は Workflow が
+  // 担うため、状態は status 照会（/runs/{id}）で確認する（この場では完了を待たない）。
+  const ranNote =
+    runId === null || runId === ""
+      ? ""
+      : `<p class="note">日次パスを起動しました（instance ${escapeHtml(runId)}）。` +
+        `状態: <a href="/runs/${encodeURIComponent(runId)}">/runs/${escapeHtml(runId)}</a></p>`;
 
   // 日次パスの手動実行ボタン。設定保存フォームとは別 form にして送信が混ざらないようにする。
   const runForm =
@@ -201,15 +204,16 @@ function renderForm(
 
 /**
  * `GET /settings`: KV の UserConfig（空なら既定）をフォーム表示する。
- * `ran` は POST /run 直後（?ran=1）に手動実行の注記を出すためのフラグ。
+ * `runId` は POST /run 直後（?run=<instanceId>）に、起動した Workflow インスタンスの
+ * ID と状態照会リンクを注記するためのもの（無ければ null）。
  */
 export async function renderSettingsForm(
   env: Env,
-  ran = false,
+  runId: string | null = null,
 ): Promise<Response> {
   const user = await loadUserConfigForForm(env);
   return htmlResponse(
-    renderForm(modelFromUserConfig(user), SYSTEM_CONFIG.scoring, [], ran),
+    renderForm(modelFromUserConfig(user), SYSTEM_CONFIG.scoring, [], runId),
   );
 }
 
@@ -238,7 +242,7 @@ export async function handleSettingsUpdate(
   }
 
   return htmlResponse(
-    renderForm(model, SYSTEM_CONFIG.scoring, errors, false),
+    renderForm(model, SYSTEM_CONFIG.scoring, errors, null),
     400,
   );
 }

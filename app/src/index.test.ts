@@ -29,8 +29,21 @@ function makeEnv() {
       };
     },
   };
-  const env = { DB: db, AI: {}, CONFIG: {} } as unknown as Env;
-  return { env, inserts };
+  // 日次パスの Workflow バインディング（create/get→status を模す）。
+  const created: string[] = [];
+  const DAILY_PASS = {
+    create: async () => {
+      const id = `wf-${created.length + 1}`;
+      created.push(id);
+      return { id };
+    },
+    get: async (id: string) => ({
+      id,
+      status: async () => ({ status: "running", output: null }),
+    }),
+  };
+  const env = { DB: db, AI: {}, CONFIG: {}, DAILY_PASS } as unknown as Env;
+  return { env, inserts, created };
 }
 
 const ctx = {} as ExecutionContext;
@@ -80,20 +93,19 @@ describe("fetch router", () => {
     expect(res.status).toBe(404);
   });
 
-  it("POST /run kicks off runDaily via waitUntil and redirects", async () => {
-    const { env } = makeEnv();
-    let captured: Promise<unknown> | undefined;
-    // waitUntil に渡された promise を捕捉し、reject は握り潰す（stub env で
-    // runDaily は load(env) 段階で落ちるが、それは検証対象ではない）。
-    const runCtx = {
-      waitUntil: (p: Promise<unknown>) => {
-        captured = p;
-        p.catch(() => {});
-      },
-    } as unknown as ExecutionContext;
-    const res = await worker.fetch!(req("/run", { method: "POST" }), env, runCtx);
+  it("POST /run creates a Workflow instance and redirects with its id", async () => {
+    const { env, created } = makeEnv();
+    const res = await worker.fetch!(req("/run", { method: "POST" }), env, ctx);
     expect(res.status).toBe(303);
-    expect(res.headers.get("location")).toBe("/settings?ran=1");
-    expect(captured).toBeInstanceOf(Promise);
+    expect(created).toHaveLength(1);
+    expect(res.headers.get("location")).toBe(`/settings?run=${created[0]}`);
+  });
+
+  it("GET /runs/{id} returns the instance status as JSON", async () => {
+    const { env } = makeEnv();
+    const res = await worker.fetch!(req("/runs/wf-42"), env, ctx);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({ status: "running", output: null });
   });
 });

@@ -1,78 +1,92 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
-  runDaily,
-  buildSourceTasks,
-  makeBodyResolver,
-  type DailyDeps,
+  ingestFeed,
+  scoreAndBuildFeed,
+  summarizeFeed,
+  buildTrends,
   type Fetchers,
-  type BodyFetchers,
+  type IngestDeps,
 } from "./daily";
-import type { Config } from "../config";
+import type {
+  DigestConfig,
+  EmbeddingConfig,
+  InterestAxis,
+  ScoringConfig,
+} from "../config";
 import type { Env } from "../index";
 import type { NormalizedArticle } from "../adapters/types";
 import type { EmbeddingResult } from "../lib/embedding";
-import type { SummaryTarget } from "../lib/summarize";
 
 const FEED_URL = "https://feed.example/rss";
 const FEED_SRC = `feed:${FEED_URL}`;
 
-function makeConfig(overrides: Partial<Config> = {}): Config {
-  return {
-    interestAxes: [
-      { id: "ai", label: "AI" },
-      { id: "web", label: "Web" },
-    ],
-    sources: {
-      feeds: [],
-    },
-    scoring: {
-      weights: { interest: 0.6, freshness: 0.3, sourceTrust: 0.1 },
-      freshnessHalfLifeDays: 7,
-      semanticDedupThreshold: 0.9,
-      sourceTrust: { feed: 0.7 },
-    },
-    embedding: { model: "m", maxInputChars: 1000 },
-    digest: { model: "d", maxOutputTokens: 300 },
-    ...overrides,
-  };
-}
-
-/** 作業集合として返す articles 行（feed_summary 列は無い）。 */
-interface ArticleRow {
-  id: number;
-  title: string;
-  source: string;
-  url: string;
-  published_at: string;
-  embedding: string | null;
-  embedding_model: string | null;
-}
-
-interface AxisRow {
-  axis_id: string;
-  embedding: string;
-  embedding_model: string;
-}
+const EMBEDDING: EmbeddingConfig = { model: "m", maxInputChars: 1000 };
+const DIGEST: DigestConfig = { model: "d", maxOutputTokens: 300 };
+const SCORING: ScoringConfig = {
+  weights: { interest: 0.6, freshness: 0.3, sourceTrust: 0.1 },
+  freshnessHalfLifeDays: 7,
+  semanticDedupThreshold: 0.9,
+  sourceTrust: { feed: 0.7 },
+};
 
 interface Op {
   kind: string;
   args: unknown[];
 }
 
+/** ingest 段の記事行（IN-select で返す最小行）。 */
+interface StoredArticle {
+  id: number;
+  url: string;
+  title: string;
+  embedding: string | null;
+}
+
+const noSleep = async () => {};
+
+function ai(run: (...args: never[]) => Promise<unknown>): Env["AI"] {
+  return { run } as unknown as Env["AI"];
+}
+
+/** 呼び出し順にベクトルを返す embed モック（1 記事 1 呼び出し）。 */
+function embedReturning(vectors: number[][]): IngestDeps["embed"] {
+  let i = 0;
+  return vi.fn(
+    async (): Promise<EmbeddingResult> => ({ vector: vectors[i++] }),
+  ) as IngestDeps["embed"];
+}
+
+function normalized(overrides: Partial<NormalizedArticle>): NormalizedArticle {
+  return {
+    url: "https://example.invalid/x",
+    title: "t",
+    source: FEED_SRC,
+    publishedAt: "2026-07-08T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function feedFetchers(articles: NormalizedArticle[]): Fetchers {
+  return { fetchFeed: vi.fn(async () => articles) };
+}
+
 /**
- * SQL をキーワードで大まかにルーティングする in-memory D1 フェイク。
- * - 直近 7 日ハッシュ（content_hash FROM articles）と作業集合（FROM articles）を
- *   区別して返す。
- * - 書き込みは種類ごとに ops に記録する。INSERT INTO articles は url キーで
- *   ON CONFLICT を模して changes を返す。
+ * ingest 用の in-memory D1 フェイク。articles を url→行 で持ち、INSERT で追加、
+ * `url IN (...)` SELECT で引き当てる。UPDATE embedding は行に反映する（再実行で
+ * 二重 embed しないことを検証できるように）。
  */
-function makeFakeDb(
-  workingSet: ArticleRow[],
-  axes: AxisRow[],
-  recentHashes: string[] = [],
+function makeIngestDb(
+  opts: {
+    recentHashes?: { url: string; hash: string }[];
+    preexisting?: StoredArticle[];
+  } = {},
 ) {
   const ops: Op[] = [];
-  const insertedUrls = new Set<string>();
+  const recentHashes = opts.recentHashes ?? [];
+  const articles = new Map<string, StoredArticle>(
+    (opts.preexisting ?? []).map((a) => [a.url, { ...a }]),
+  );
+  let nextId = 100;
   const db = {
     ops,
     prepare(sql: string) {
@@ -86,18 +100,20 @@ function makeFakeDb(
         async all<T>() {
           if (s.includes("content_hash FROM articles")) {
             return {
-              results: recentHashes.map((h) => ({ content_hash: h })) as unknown as T[],
-              success: true,
-              meta: {},
+              results: recentHashes.map((r) => ({
+                url: r.url,
+                content_hash: r.hash,
+              })) as unknown as T[],
             };
           }
-          if (s.includes("FROM articles")) {
-            return { results: workingSet as unknown as T[], success: true, meta: {} };
+          if (s.includes("url IN")) {
+            const urls = this._args as string[];
+            const rows = urls
+              .map((u) => articles.get(u))
+              .filter((r): r is StoredArticle => r !== undefined);
+            return { results: rows as unknown as T[] };
           }
-          if (s.includes("FROM interest_axes")) {
-            return { results: axes as unknown as T[], success: true, meta: {} };
-          }
-          return { results: [] as T[], success: true, meta: {} };
+          return { results: [] as T[] };
         },
         async run() {
           let kind = "other";
@@ -105,25 +121,329 @@ function makeFakeDb(
           if (/^INSERT INTO articles/i.test(s)) {
             kind = "insert-article";
             const url = this._args[0] as string;
-            changes = insertedUrls.has(url) ? 0 : 1;
-            insertedUrls.add(url);
-          } else if (/^UPDATE articles SET embedding/i.test(s)) kind = "update-embedding";
-          else if (/^UPDATE articles SET score/i.test(s)) kind = "update-score";
-          else if (/^DELETE FROM feed_entries/i.test(s)) kind = "delete-entries";
-          else if (/^INSERT INTO feed_entries/i.test(s)) kind = "insert-entry";
-          else if (/^UPDATE feed_entries SET summary/i.test(s)) kind = "update-summary";
-          else if (/^DELETE FROM feed_trends/i.test(s)) kind = "delete-trends";
-          else if (/^INSERT INTO feed_trends/i.test(s)) kind = "insert-trend";
+            if (articles.has(url)) {
+              changes = 0;
+            } else {
+              articles.set(url, {
+                id: nextId++,
+                url,
+                title: this._args[1] as string,
+                embedding: null,
+              });
+              changes = 1;
+            }
+          } else if (/^UPDATE articles SET embedding/i.test(s)) {
+            kind = "update-embedding";
+            const id = this._args[2];
+            for (const row of articles.values()) {
+              if (row.id === id) row.embedding = this._args[0] as string;
+            }
+          }
           ops.push({ kind, args: this._args });
           return { success: true, meta: { changes } };
         },
       };
     },
   };
-  return db;
+  return { db: db as unknown as D1Database, ops, articles };
 }
 
-function row(overrides: Partial<ArticleRow> = {}): ArticleRow {
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("ingestFeed", () => {
+  it("inserts metadata only (5 args), embeds NULL rows, returns counts", async () => {
+    const { db, ops } = makeIngestDb();
+    const fetchers = feedFetchers([
+      normalized({
+        url: "u1",
+        title: "Imaginary framework reaches version one",
+        feedSummary: "a post about testing fictional widgets",
+      }),
+      normalized({
+        url: "u2",
+        title: "Why my pretend cache never warms up",
+        feedSummary: "notes on invented cache warming strategies",
+      }),
+    ]);
+    const embed = embedReturning([
+      [1, 0, 0],
+      [0, 1, 0],
+    ]);
+
+    const result = await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      { fetchers, embed, sleep: noSleep },
+    );
+
+    const inserts = ops.filter((o) => o.kind === "insert-article");
+    expect(inserts).toHaveLength(2);
+    for (const ins of inserts) expect(ins.args).toHaveLength(5);
+
+    const embUpdates = ops.filter((o) => o.kind === "update-embedding");
+    expect(embUpdates).toHaveLength(2);
+    expect(embUpdates[0].args).toContain("m"); // embedding_model
+
+    expect(result).toMatchObject({
+      feedUrl: FEED_URL,
+      fetched: 2,
+      inserted: 2,
+      duplicateSkipped: 0,
+      embedded: 2,
+      embedFailed: 0,
+    });
+  });
+
+  it("skips SimHash near-duplicates of recent hashes (no insert, no embed)", async () => {
+    // First compute the hash the code will produce for the article, then seed it
+    // as a recent hash so the dedup path triggers.
+    const { simhash } = await import("../lib/simhash");
+    const article = normalized({
+      url: "dup",
+      title: "identical title here",
+      feedSummary: "identical summary body",
+    });
+    const hash = simhash(`${article.title} ${article.feedSummary}`);
+    // A *different* url already carries this hash → the fetched one is a near-duplicate.
+    const { db, ops } = makeIngestDb({
+      recentHashes: [{ url: "https://other.invalid/prior", hash }],
+    });
+    const embed = embedReturning([]);
+
+    const result = await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      { fetchers: feedFetchers([article]), embed, sleep: noSleep },
+    );
+
+    expect(ops.filter((o) => o.kind === "insert-article")).toHaveLength(0);
+    expect(embed).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      fetched: 1,
+      inserted: 0,
+      duplicateSkipped: 1,
+      embedded: 0,
+    });
+  });
+
+  it("never writes body or feedSummary to any DB write or console output", async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, "warn").mockImplementation((...a) => {
+      logs.push(a.join(" "));
+    });
+    const { db, ops } = makeIngestDb();
+    const fetchers = feedFetchers([
+      normalized({
+        url: "u1",
+        title: "t1",
+        feedSummary: "SENTINEL_FEED_SUMMARY",
+        body: "SENTINEL_BODY",
+      }),
+    ]);
+
+    await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      { fetchers, embed: embedReturning([[1, 0, 0]]), sleep: noSleep },
+    );
+
+    const writtenArgs = JSON.stringify(ops.map((o) => o.args));
+    expect(writtenArgs).not.toContain("SENTINEL_BODY");
+    expect(writtenArgs).not.toContain("SENTINEL_FEED_SUMMARY");
+    expect(logs.join("\n")).not.toContain("SENTINEL_BODY");
+    expect(logs.join("\n")).not.toContain("SENTINEL_FEED_SUMMARY");
+  });
+
+  it("re-embeds a re-fetched article whose own hash is already persisted (retry safety)", async () => {
+    // Simulate an interrupted prior run: A was inserted (hash persisted for its own url)
+    // but embedding never ran (embedding NULL). Re-running ingest must NOT treat A as a
+    // duplicate of itself, and must embed it.
+    const article = normalized({ url: "u1", title: "t1", feedSummary: "s1" });
+    const { simhash } = await import("../lib/simhash");
+    const hash = simhash(`${article.title} ${article.feedSummary}`);
+    const { db, ops } = makeIngestDb({
+      recentHashes: [{ url: "u1", hash }], // same url as the fetched article
+      preexisting: [{ id: 1, url: "u1", title: "t1", embedding: null }],
+    });
+    const embed = embedReturning([[1, 0, 0]]);
+
+    const result = await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      { fetchers: feedFetchers([article]), embed, sleep: noSleep },
+    );
+
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(ops.filter((o) => o.kind === "update-embedding")).toHaveLength(1);
+    expect(result).toMatchObject({ duplicateSkipped: 0, embedded: 1 });
+  });
+
+  it("is idempotent: already-embedded rows are not re-embedded", async () => {
+    const { db, ops } = makeIngestDb({
+      preexisting: [
+        { id: 1, url: "u1", title: "t1", embedding: "[1,0,0]" },
+      ],
+    });
+    const embed = embedReturning([]);
+
+    const result = await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      {
+        fetchers: feedFetchers([
+          normalized({ url: "u1", title: "t1", feedSummary: "s1" }),
+        ]),
+        embed,
+        sleep: noSleep,
+      },
+    );
+
+    expect(embed).not.toHaveBeenCalled();
+    expect(ops.filter((o) => o.kind === "update-embedding")).toHaveLength(0);
+    expect(result.embedded).toBe(0);
+  });
+
+  it("keeps going when one article's embedding fails (skip, count it)", async () => {
+    const { db, ops } = makeIngestDb();
+    const fetchers = feedFetchers([
+      normalized({ url: "u1", title: "落ちる記事", feedSummary: "s1" }),
+      normalized({ url: "u2", title: "通る記事", feedSummary: "s2" }),
+    ]);
+    const embed = vi.fn(
+      async (_ai: unknown, _model: string, text: string) => {
+        if (text.includes("落ちる")) throw new Error("embed failed");
+        return { vector: [1, 0, 0] };
+      },
+    ) as IngestDeps["embed"];
+
+    const result = await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      { fetchers, embed, sleep: noSleep },
+    );
+
+    expect(ops.filter((o) => o.kind === "update-embedding")).toHaveLength(1);
+    expect(result).toMatchObject({ embedded: 1, embedFailed: 1 });
+  });
+
+  it("throws when the feed fetch fails (step retry / all-fail handled by caller)", async () => {
+    const { db } = makeIngestDb();
+    const fetchers: Fetchers = {
+      fetchFeed: vi.fn(async () => {
+        throw new Error("feed down");
+      }),
+    };
+
+    await expect(
+      ingestFeed(
+        db,
+        ai(vi.fn()),
+        FEED_URL,
+        new Date("2026-07-08T00:00:00.000Z"),
+        EMBEDDING,
+        { fetchers, embed: embedReturning([]), sleep: noSleep },
+      ),
+    ).rejects.toThrow("feed down");
+  });
+});
+
+/** score / summarize / trends 用の、SQL キーワードでルーティングする D1 フェイク。 */
+interface WorkingRow {
+  id: number;
+  title: string;
+  source: string;
+  url: string;
+  published_at: string;
+  embedding: string | null;
+  embedding_model: string | null;
+}
+interface AxisRow {
+  axis_id: string;
+  embedding: string;
+  embedding_model: string;
+}
+interface EntryRow {
+  article_id: number;
+  title: string;
+  source: string;
+  url: string;
+}
+interface TrendRow {
+  hit_axis: string | null;
+  title: string;
+}
+
+function makeReadDb(reads: {
+  workingSet?: WorkingRow[];
+  axes?: AxisRow[];
+  entries?: EntryRow[];
+  trendRows?: TrendRow[];
+}) {
+  const ops: Op[] = [];
+  const db = {
+    ops,
+    prepare(sql: string) {
+      const s = sql.replace(/\s+/g, " ").trim();
+      return {
+        _args: [] as unknown[],
+        bind(...args: unknown[]) {
+          this._args = args;
+          return this;
+        },
+        async all<T>() {
+          if (s.includes("hit_axis AS hit_axis")) {
+            return { results: (reads.trendRows ?? []) as unknown as T[] };
+          }
+          if (s.includes("feed_entries fe JOIN")) {
+            return { results: (reads.entries ?? []) as unknown as T[] };
+          }
+          if (s.includes("FROM interest_axes")) {
+            return { results: (reads.axes ?? []) as unknown as T[] };
+          }
+          if (s.includes("FROM articles")) {
+            return { results: (reads.workingSet ?? []) as unknown as T[] };
+          }
+          return { results: [] as T[] };
+        },
+        async run() {
+          let kind = "other";
+          if (/^UPDATE articles SET score/i.test(s)) kind = "update-score";
+          else if (/^DELETE FROM feed_entries/i.test(s)) kind = "delete-entries";
+          else if (/^INSERT INTO feed_entries/i.test(s)) kind = "insert-entry";
+          else if (/^UPDATE feed_entries SET summary/i.test(s))
+            kind = "update-summary";
+          else if (/^DELETE FROM feed_trends/i.test(s)) kind = "delete-trends";
+          else if (/^INSERT INTO feed_trends/i.test(s)) kind = "insert-trend";
+          ops.push({ kind, args: this._args });
+          return { success: true, meta: { changes: 1 } };
+        },
+      };
+    },
+  };
+  return { db: db as unknown as D1Database, ops };
+}
+
+function workingRow(overrides: Partial<WorkingRow> = {}): WorkingRow {
   return {
     id: 1,
     title: "t",
@@ -136,157 +456,28 @@ function row(overrides: Partial<ArticleRow> = {}): ArticleRow {
   };
 }
 
-/** 呼び出し順にベクトルを返す embed モック（1 記事 1 呼び出し）。 */
-function embedReturning(vectors: number[][]): DailyDeps["embed"] {
-  let i = 0;
-  return vi.fn(async (): Promise<EmbeddingResult> => ({
-    vector: vectors[i++],
-  })) as DailyDeps["embed"];
-}
-
-const noSleep = async () => {};
-const now = () => new Date("2026-07-08T21:00:00.000Z");
-
-/** ソースを何も返さない Fetchers（buildSourceTasks/runDaily の既定注入用）。 */
-function emptyFetchers(): Fetchers {
-  return {
-    fetchFeed: vi.fn(async () => []),
-  };
-}
-
-const noBodyFetchers: BodyFetchers = {
-  resolveFeedBody: async () => null,
-};
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
-
-describe("buildSourceTasks", () => {
-  it("wires config feeds to fetchFeed with injected windowStart", () => {
-    const windowStart = new Date("2026-07-08T00:00:00.000Z");
-    const config = makeConfig({
-      sources: {
-        feeds: ["https://a.example/rss", "https://b.example/atom"],
-      },
-    });
-    const fetchers = emptyFetchers();
-
-    const tasks = buildSourceTasks(config, fetchers, windowStart);
-    // 2 feeds = 2 tasks
-    expect(tasks).toHaveLength(2);
-    for (const task of tasks) task.fetch();
-
-    expect(fetchers.fetchFeed).toHaveBeenCalledWith("https://a.example/rss", windowStart);
-    expect(fetchers.fetchFeed).toHaveBeenCalledWith("https://b.example/atom", windowStart);
-  });
-});
-
-describe("makeBodyResolver", () => {
-  function target(overrides: Partial<SummaryTarget> = {}): SummaryTarget {
-    return {
-      articleId: 1,
-      title: "t",
-      source: FEED_SRC,
-      url: "https://example.invalid/a",
-      feedSummary: null,
-      ...overrides,
-    };
-  }
-
-  it("uses in-memory body without fetching (feed inline content)", async () => {
-    const resolveFeedBody = vi.fn(async () => "should-not-be-called");
-    const memById = new Map([[7, { body: "MEMORY_BODY" }]]);
-    const resolve = makeBodyResolver(memById, { resolveFeedBody });
-
-    const body = await resolve(target({ articleId: 7 }));
-
-    expect(body).toBe("MEMORY_BODY");
-    expect(resolveFeedBody).not.toHaveBeenCalled();
-  });
-
-  it("resolves via resolveFeedBody when no in-memory body", async () => {
-    const resolveFeedBody = vi.fn(async () => "FEED_BODY");
-    const resolve = makeBodyResolver(new Map(), { resolveFeedBody });
-
-    const body = await resolve(
-      target({ url: "https://x.example/a", feedSummary: "s" }),
-    );
-
-    expect(body).toBe("FEED_BODY");
-    expect(resolveFeedBody).toHaveBeenCalledTimes(1);
-    expect(resolveFeedBody).toHaveBeenCalledWith({
-      url: "https://x.example/a",
-      feedSummary: "s",
-    });
-  });
-
-  it("returns null when resolveFeedBody yields null (falls back downstream)", async () => {
-    const resolve = makeBodyResolver(new Map(), {
-      resolveFeedBody: async () => null,
-    });
-    const body = await resolve(target({ url: "https://example.invalid/x" }));
-    expect(body).toBeNull();
-  });
-});
-
-describe("runDaily — single pass orchestration", () => {
-  function normalized(overrides: Partial<NormalizedArticle>): NormalizedArticle {
-    return {
-      url: "https://example.invalid/x",
-      title: "t",
-      source: FEED_SRC,
-      publishedAt: "2026-07-08T00:00:00.000Z",
-      ...overrides,
-    };
-  }
-
-  it("fetches, inserts metadata only, embeds, dedups, scores, writes ranked feed + all-entries summaries + trends", async () => {
-    const fetchers = emptyFetchers();
-    // Distinct, longer text so SimHash does not treat them as near-duplicates.
-    fetchers.fetchFeed = vi.fn(async () => [
-      normalized({
-        url: "u1",
-        title: "Imaginary framework reaches version one",
-        source: FEED_SRC,
-        feedSummary: "a post about testing fictional widgets",
-      }),
-      normalized({
-        url: "u2",
-        title: "Why my pretend cache never warms up",
-        source: FEED_SRC,
-        feedSummary: "notes on invented cache warming strategies",
-        body: "BODY2",
-      }),
-      normalized({
-        url: "u3",
-        title: "Sprocket release notes for the flux module",
-        source: FEED_SRC,
-        feedSummary: "adds the imaginary flux capacitor module",
-        body: "BODY3",
-      }),
-    ]);
-
-    // Working set (what the DB returns after insert): the three fetched articles.
-    // published_at differentiates freshness so ranking is deterministic even though
-    // all three share the same source trust (feed).
+describe("scoreAndBuildFeed", () => {
+  it("dedups, scores, and rebuilds feed_entries (delete-first, ranked)", async () => {
     const workingSet = [
-      row({
+      workingRow({
         id: 1,
-        title: "t1",
         url: "u1",
+        embedding: "[1,0,0]",
+        embedding_model: "m",
         published_at: "2026-07-07T21:00:00.000Z",
       }),
-      row({
+      workingRow({
         id: 2,
-        title: "t2",
         url: "u2",
+        embedding: "[0,1,0]",
+        embedding_model: "m",
         published_at: "2026-07-08T21:00:00.000Z",
       }),
-      row({
+      workingRow({
         id: 3,
-        title: "t3",
         url: "u3",
+        embedding: "[0,0,1]",
+        embedding_model: "m",
         published_at: "2026-07-08T00:00:00.000Z",
       }),
     ];
@@ -294,261 +485,183 @@ describe("runDaily — single pass orchestration", () => {
       { axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" },
       { axis_id: "web", embedding: "[0,1,0]", embedding_model: "m" },
     ];
-    const db = makeFakeDb(workingSet, axes);
+    const { db, ops } = makeReadDb({ workingSet, axes });
 
-    // Distinct vectors -> no dedup. a1~ai, a2~web, a3~orthogonal.
-    const embed = embedReturning([
-      [1, 0, 0],
-      [0, 1, 0],
-      [0, 0, 1],
-    ]);
-    const aiRun = vi.fn(async () => ({ response: "要約" }));
-    const env = { AI: { run: aiRun } } as unknown as Env;
+    const result = await scoreAndBuildFeed(
+      db,
+      SCORING,
+      "m",
+      new Date("2026-07-08T21:00:00.000Z"),
+    );
 
-    await runDaily(env, {
-      db: db as unknown as D1Database,
-      fetchers,
-      bodyFetchers: {
-        resolveFeedBody: async () => "should-not-be-called",
-      },
-      loadConfig: async () =>
-        makeConfig({
-          sources: {
-            feeds: [FEED_URL],
-          },
-        }),
-      syncInterestAxes: vi.fn(async () => {}),
-      embed,
-      sleep: noSleep,
-      now,
-    });
-
-    // Metadata inserts: exactly 5 bind args (no feed_summary column).
-    const inserts = db.ops.filter((o) => o.kind === "insert-article");
-    expect(inserts).toHaveLength(3);
-    for (const ins of inserts) expect(ins.args).toHaveLength(5);
-
-    // Embedding saved for all 3 (embedding IS NULL) with model name.
-    const embUpdates = db.ops.filter((o) => o.kind === "update-embedding");
-    expect(embUpdates).toHaveLength(3);
-    expect(embUpdates.some((o) => o.args.includes("[1,0,0]"))).toBe(true);
-    expect(embUpdates[0].args).toContain("m");
-
-    // feed_entries: delete before any insert; one per kept article.
-    const entryOps = db.ops.filter(
+    const entryOps = ops.filter(
       (o) => o.kind === "delete-entries" || o.kind === "insert-entry",
     );
     expect(entryOps[0].kind).toBe("delete-entries");
-    const feedInserts = db.ops.filter((o) => o.kind === "insert-entry");
+    const feedInserts = ops.filter((o) => o.kind === "insert-entry");
     expect(feedInserts).toHaveLength(3);
     // Rank by score desc: a2 (web, freshest) > a1 (ai, older) > a3 (orthogonal).
-    // args: [date, article_id, rank]
     const byRank = new Map(feedInserts.map((o) => [o.args[2], o.args[1]]));
     expect(byRank.get(1)).toBe(2);
     expect(byRank.get(2)).toBe(1);
     expect(byRank.get(3)).toBe(3);
     expect(feedInserts[0].args[0]).toBe("2026-07-08");
-
-    // All entries summarized (not just top N).
-    expect(db.ops.filter((o) => o.kind === "update-summary")).toHaveLength(3);
-
-    // Trends: delete-first then one row per axis with hit counts.
-    const trendOps = db.ops.filter(
-      (o) => o.kind === "delete-trends" || o.kind === "insert-trend",
-    );
-    expect(trendOps[0].kind).toBe("delete-trends");
-    const trendInserts = db.ops.filter((o) => o.kind === "insert-trend");
-    expect(trendInserts).toHaveLength(2);
-    const trendByAxis = new Map(trendInserts.map((o) => [o.args[1], o.args[2]]));
-    expect(trendByAxis.get("ai")).toBe(2); // a1, a3
-    expect(trendByAxis.get("web")).toBe(1); // a2
+    expect(result).toMatchObject({
+      candidates: 3,
+      excludedFromFeed: 0,
+      feedEntries: 3,
+    });
   });
 
-  it("never persists body or feedSummary to any DB write or console output", async () => {
-    const logs: string[] = [];
-    vi.spyOn(console, "log").mockImplementation((...a) => {
-      logs.push(a.join(" "));
-    });
-    vi.spyOn(console, "warn").mockImplementation((...a) => {
-      logs.push(a.join(" "));
-    });
-
-    const fetchers = emptyFetchers();
-    fetchers.fetchFeed = vi.fn(async () => [
-      normalized({
-        url: "u1",
-        title: "t1",
-        source: FEED_SRC,
-        feedSummary: "SENTINEL_FEED_SUMMARY",
-        body: "SENTINEL_BODY",
+  it("excludes rows without a current-model embedding", async () => {
+    const workingSet = [
+      workingRow({ id: 1, url: "u1", embedding: null }),
+      workingRow({
+        id: 2,
+        url: "u2",
+        embedding: "[1,0,0]",
+        embedding_model: "old-model",
       }),
-    ]);
-    const workingSet = [row({ id: 1, title: "t1", url: "u1" })];
-    const axes: AxisRow[] = [{ axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" }];
-    const db = makeFakeDb(workingSet, axes);
-    const env = { AI: { run: vi.fn(async () => ({ response: "要約" })) } } as unknown as Env;
-
-    await runDaily(env, {
-      db: db as unknown as D1Database,
-      fetchers,
-      bodyFetchers: {
-        resolveFeedBody: async () => "SENTINEL_BODY",
-      },
-      loadConfig: async () =>
-        makeConfig({
-          sources: {
-            feeds: [FEED_URL],
-          },
-        }),
-      syncInterestAxes: vi.fn(async () => {}),
-      embed: embedReturning([[1, 0, 0]]),
-      sleep: noSleep,
-      now,
-    });
-
-    const writtenArgs = JSON.stringify(db.ops.map((o) => o.args));
-    expect(writtenArgs).not.toContain("SENTINEL_BODY");
-    expect(writtenArgs).not.toContain("SENTINEL_FEED_SUMMARY");
-    const allLogs = logs.join("\n");
-    expect(allLogs).not.toContain("SENTINEL_BODY");
-    expect(allLogs).not.toContain("SENTINEL_FEED_SUMMARY");
-  });
-
-  it("re-run is idempotent: skips embedding for already-embedded articles but rebuilds the feed", async () => {
-    const fetchers = emptyFetchers();
-    fetchers.fetchFeed = vi.fn(async () => [
-      normalized({ url: "u1", title: "t1", source: FEED_SRC, feedSummary: "s1" }),
-    ]);
-    // Working set already has an embedding (second-run scenario).
-    const workingSet = [
-      row({ id: 1, title: "t1", url: "u1", embedding: "[1,0,0]", embedding_model: "m" }),
+      workingRow({
+        id: 3,
+        url: "u3",
+        embedding: "[0,1,0]",
+        embedding_model: "m",
+      }),
     ];
-    const axes: AxisRow[] = [{ axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" }];
-    const db = makeFakeDb(workingSet, axes);
-    const embed = embedReturning([]);
-    const env = { AI: { run: vi.fn(async () => ({ response: "要約" })) } } as unknown as Env;
+    const { db, ops } = makeReadDb({ workingSet, axes: [] });
 
-    await runDaily(env, {
-      db: db as unknown as D1Database,
-      fetchers,
-      bodyFetchers: noBodyFetchers,
-      loadConfig: async () => makeConfig({ sources: { feeds: [FEED_URL] } }),
-      syncInterestAxes: vi.fn(async () => {}),
-      embed,
-      sleep: noSleep,
-      now,
-    });
-
-    expect(embed).not.toHaveBeenCalled();
-    expect(db.ops.filter((o) => o.kind === "update-embedding")).toHaveLength(0);
-    // delete-then-insert makes the feed rebuild idempotent.
-    const entryOps = db.ops.filter(
-      (o) => o.kind === "delete-entries" || o.kind === "insert-entry",
+    const result = await scoreAndBuildFeed(
+      db,
+      SCORING,
+      "m",
+      new Date("2026-07-08T21:00:00.000Z"),
     );
-    expect(entryOps[0].kind).toBe("delete-entries");
-    expect(db.ops.filter((o) => o.kind === "insert-entry")).toHaveLength(1);
+
+    expect(ops.filter((o) => o.kind === "insert-entry")).toHaveLength(1);
+    expect(result).toMatchObject({ candidates: 1, excludedFromFeed: 2 });
   });
+});
 
-  it("keeps going when one article's embedding fails (skip, no total wipe)", async () => {
-    const fetchers = emptyFetchers();
-    fetchers.fetchFeed = vi.fn(async () => [
-      normalized({ url: "u1", title: "落ちる記事", source: FEED_SRC, feedSummary: "s1" }),
-      normalized({ url: "u2", title: "通る記事", source: FEED_SRC, feedSummary: "s2", body: "b" }),
-    ]);
-    const workingSet = [
-      row({ id: 1, title: "落ちる記事", url: "u1" }),
-      row({ id: 2, title: "通る記事", url: "u2" }),
-    ];
-    const axes: AxisRow[] = [{ axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" }];
-    const db = makeFakeDb(workingSet, axes);
-    const embed = vi.fn(async (_ai: unknown, _model: string, text: string) => {
-      if (text.includes("落ちる")) throw new Error("embedding permanently failed");
-      return { vector: [1, 0, 0] };
-    }) as unknown as DailyDeps["embed"];
-    const env = { AI: { run: vi.fn(async () => ({ response: "要約" })) } } as unknown as Env;
+describe("summarizeFeed", () => {
+  const entries: EntryRow[] = [
+    { article_id: 1, title: "t1", source: FEED_SRC, url: "https://x/1" },
+    { article_id: 2, title: "t2", source: FEED_SRC, url: "https://x/2" },
+  ];
 
-    await runDaily(env, {
-      db: db as unknown as D1Database,
-      fetchers,
-      bodyFetchers: noBodyFetchers,
-      loadConfig: async () => makeConfig({ sources: { feeds: [FEED_URL] } }),
-      syncInterestAxes: vi.fn(async () => {}),
-      embed,
+  it("re-fetches body per entry and writes generated summaries", async () => {
+    const { db, ops } = makeReadDb({ entries });
+    const resolveFeedBody = vi.fn(async () => "re-fetched body");
+
+    const result = await summarizeFeed(db, ai(vi.fn(async () => ({ response: "要約" }))), DIGEST, "2026-07-08", {
+      bodyFetchers: { resolveFeedBody },
       sleep: noSleep,
-      now,
     });
 
-    expect(db.ops.filter((o) => o.kind === "update-embedding")).toHaveLength(1);
-    const feedInserts = db.ops.filter((o) => o.kind === "insert-entry");
-    expect(feedInserts).toHaveLength(1);
-    expect(feedInserts[0].args[1]).toBe(2);
+    // body was re-fetched (never carried from a prior step) for each entry.
+    expect(resolveFeedBody).toHaveBeenCalledTimes(2);
+    expect(resolveFeedBody).toHaveBeenCalledWith({ url: "https://x/1" });
+    const updates = ops.filter((o) => o.kind === "update-summary");
+    expect(updates).toHaveLength(2);
+    expect(result).toMatchObject({ summarized: 2, summaryFailed: 0 });
   });
 
-  it("keeps going when one article's summary fails (excluded, others still summarized)", async () => {
-    const fetchers = emptyFetchers();
-    fetchers.fetchFeed = vi.fn(async () => [
-      normalized({ url: "u1", title: "落ちる記事", source: FEED_SRC, feedSummary: "s1" }),
-      normalized({ url: "u2", title: "通る記事", source: FEED_SRC, feedSummary: "s2" }),
-    ]);
-    const workingSet = [
-      row({ id: 1, title: "落ちる記事", url: "u1" }),
-      row({ id: 2, title: "通る記事", url: "u2" }),
-    ];
-    const axes: AxisRow[] = [{ axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" }];
-    const db = makeFakeDb(workingSet, axes);
-    // Article summaries go through AI.run; fail the one for "落ちる".
-    const aiRun = vi.fn(
+  it("does not persist the re-fetched body (only the generated summary)", async () => {
+    const { db, ops } = makeReadDb({ entries: [entries[0]] });
+
+    await summarizeFeed(db, ai(vi.fn(async () => ({ response: "要約" }))), DIGEST, "2026-07-08", {
+      bodyFetchers: { resolveFeedBody: async () => "SENTINEL_BODY" },
+      sleep: noSleep,
+    });
+
+    const writtenArgs = JSON.stringify(ops.map((o) => o.args));
+    expect(writtenArgs).not.toContain("SENTINEL_BODY");
+    expect(writtenArgs).toContain("要約");
+  });
+
+  it("keeps going when one entry's summary fails", async () => {
+    const { db, ops } = makeReadDb({ entries });
+    const run = vi.fn(
       async (_model: string, input: { messages: { content: string }[] }) => {
-        if (input.messages[1].content.includes("落ちる")) {
-          throw new Error("LLM permanently failed");
+        if (input.messages[1].content.includes("FAIL")) {
+          throw new Error("LLM failed");
         }
         return { response: "生成テキスト" };
       },
     );
-    const env = { AI: { run: aiRun } } as unknown as Env;
 
-    await runDaily(env, {
-      db: db as unknown as D1Database,
-      fetchers,
-      bodyFetchers: noBodyFetchers,
-      loadConfig: async () => makeConfig({ sources: { feeds: [FEED_URL] } }),
-      syncInterestAxes: vi.fn(async () => {}),
-      embed: embedReturning([[1, 0, 0], [0, 1, 0]]),
+    const result = await summarizeFeed(db, ai(run), DIGEST, "2026-07-08", {
+      bodyFetchers: {
+        resolveFeedBody: async ({ url }) =>
+          url.endsWith("/1") ? "FAIL body" : "ok body",
+      },
       sleep: noSleep,
-      now,
     });
 
-    // Both entries in the feed, but only the surviving one gets a summary UPDATE.
-    expect(db.ops.filter((o) => o.kind === "insert-entry")).toHaveLength(2);
-    const summaryUpdates = db.ops.filter((o) => o.kind === "update-summary");
-    expect(summaryUpdates).toHaveLength(1);
-    expect(summaryUpdates[0].args[2]).toBe(2); // article_id 2 survived
+    expect(ops.filter((o) => o.kind === "update-summary")).toHaveLength(1);
+    expect(result).toMatchObject({ summarized: 1, summaryFailed: 1 });
+  });
+});
+
+describe("buildTrends", () => {
+  const axesConfig: InterestAxis[] = [
+    { id: "ai", label: "AI" },
+    { id: "web", label: "Web" },
+  ];
+
+  it("counts per axis and inserts trends (delete-first)", async () => {
+    const trendRows: TrendRow[] = [
+      { hit_axis: "ai", title: "a1" },
+      { hit_axis: "web", title: "a2" },
+      { hit_axis: "ai", title: "a3" },
+    ];
+    const { db, ops } = makeReadDb({ trendRows });
+
+    const result = await buildTrends(
+      db,
+      ai(vi.fn(async () => ({ response: "傾向" }))),
+      DIGEST,
+      axesConfig,
+      "2026-07-08",
+      { sleep: noSleep },
+    );
+
+    const trendOps = ops.filter(
+      (o) => o.kind === "delete-trends" || o.kind === "insert-trend",
+    );
+    expect(trendOps[0].kind).toBe("delete-trends");
+    const inserts = ops.filter((o) => o.kind === "insert-trend");
+    expect(inserts).toHaveLength(2);
+    const byAxis = new Map(inserts.map((o) => [o.args[1], o.args[2]]));
+    expect(byAxis.get("ai")).toBe(2);
+    expect(byAxis.get("web")).toBe(1);
+    expect(inserts[0].args[0]).toBe("2026-07-08");
+    expect(result).toEqual({ trendFailed: 0 });
   });
 
-  it("throws only when every source fails", async () => {
-    const fetchers = emptyFetchers();
-    fetchers.fetchFeed = vi.fn(async () => {
-      throw new Error("feed down");
-    });
-    const db = makeFakeDb([], []);
-    const env = { AI: { run: vi.fn() } } as unknown as Env;
+  it("inserts hit_count only when narrative generation fails", async () => {
+    const trendRows: TrendRow[] = [{ hit_axis: "ai", title: "a1" }];
+    const { db, ops } = makeReadDb({ trendRows });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    await expect(
-      runDaily(env, {
-        db: db as unknown as D1Database,
-        fetchers,
-        bodyFetchers: noBodyFetchers,
-        loadConfig: async () =>
-          makeConfig({
-            sources: {
-              feeds: [FEED_URL],
-            },
-          }),
-        syncInterestAxes: vi.fn(async () => {}),
-        embed: embedReturning([]),
-        sleep: noSleep,
-        now,
-      }),
-    ).rejects.toThrow();
+    const result = await buildTrends(
+      db,
+      ai(
+        vi.fn(async () => {
+          throw new Error("LLM failed");
+        }),
+      ),
+      DIGEST,
+      axesConfig,
+      "2026-07-08",
+      { sleep: noSleep },
+    );
+
+    const inserts = ops.filter((o) => o.kind === "insert-trend");
+    // ai axis: hit_count 1, narrative null (failed). web axis: hit_count 0.
+    const aiInsert = inserts.find((o) => o.args[1] === "ai");
+    expect(aiInsert?.args[2]).toBe(1);
+    expect(aiInsert?.args[3]).toBeNull();
+    expect(result).toEqual({ trendFailed: 1 });
   });
 });

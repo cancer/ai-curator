@@ -110,13 +110,15 @@ describe("renderSettingsForm", () => {
   it("omits the started note by default", async () => {
     const { env } = makeEnv();
     const html = await (await renderSettingsForm(env)).text();
-    expect(html).not.toContain("実行を開始しました");
+    expect(html).not.toContain("日次パスを起動しました");
   });
 
-  it("shows a started note when ran=1", async () => {
+  it("shows the instance id and a status link when a run id is given", async () => {
     const { env } = makeEnv();
-    const html = await (await renderSettingsForm(env, true)).text();
-    expect(html).toContain("実行を開始しました");
+    const html = await (await renderSettingsForm(env, "abc-123")).text();
+    expect(html).toContain("日次パスを起動しました");
+    expect(html).toContain("abc-123");
+    expect(html).toContain('href="/runs/abc-123"');
   });
 });
 
