@@ -123,8 +123,12 @@ export const DEFAULT_USER_CONFIG: UserConfig = {
   ],
   sources: {
     feeds: [
+      "https://medium.com/feed/tag/technology",
+      "https://news.ycombinator.com/rss",
       "https://martinfowler.com/feed.atom",
-      "https://medium.com/feed/@examplauthor",
+      "https://blog.cleancoder.com/atom.xml",
+      "https://tidyfirst.substack.com/feed",
+      "https://t-wada.hatenablog.jp/feed",
     ],
   },
 };
