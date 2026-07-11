@@ -194,4 +194,57 @@ describe("summarizeEntries", () => {
     expect(summaries.has(1)).toBe(false);
     expect(summaries.get(2)).toBe("ok");
   });
+
+  it("invokes onSummary per successful entry (persistence hook), not for failed ones", async () => {
+    const { ai } = mockAi(async (_m, options) => {
+      if (options.messages[1].content.includes("落ちる")) {
+        throw new Error("LLM error");
+      }
+      return { response: "ok" };
+    });
+    const resolveBody = async (t: SummaryTarget) => t.title;
+    const noSleep = async () => {};
+    const persisted: [number, string][] = [];
+    const onSummary = async (articleId: number, summary: string) => {
+      persisted.push([articleId, summary]);
+    };
+
+    const { failed } = await summarizeEntries(
+      ai,
+      digest,
+      [
+        target({ articleId: 1, title: "落ちる記事" }),
+        target({ articleId: 2, title: "通る記事" }),
+      ],
+      resolveBody,
+      noSleep,
+      onSummary,
+    );
+
+    // Only the surviving entry is persisted; the failed one never reaches onSummary.
+    expect(failed).toBe(1);
+    expect(persisted).toEqual([[2, "ok"]]);
+  });
+
+  it("counts an entry as failed when onSummary (persistence) throws, and keeps going", async () => {
+    const { ai } = mockAi(async () => ({ response: "ok" }));
+    const resolveBody = async (t: SummaryTarget) => t.title;
+    const noSleep = async () => {};
+    const onSummary = async (articleId: number) => {
+      if (articleId === 1) throw new Error("D1 write failed");
+    };
+
+    const { summaries, failed } = await summarizeEntries(
+      ai,
+      digest,
+      [target({ articleId: 1 }), target({ articleId: 2 })],
+      resolveBody,
+      noSleep,
+      onSummary,
+    );
+
+    expect(failed).toBe(1);
+    expect(summaries.has(1)).toBe(false);
+    expect(summaries.get(2)).toBe("ok");
+  });
 });

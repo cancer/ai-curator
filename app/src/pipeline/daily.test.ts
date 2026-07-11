@@ -387,6 +387,8 @@ interface EntryRow {
   title: string;
   source: string;
   url: string;
+  /** テスト内部の絞り込み用（ENTRIES_FOR_DATE_SQL の `summary IS NULL` を模す）。 */
+  summary?: string | null;
 }
 interface TrendRow {
   hit_axis: string | null;
@@ -415,7 +417,12 @@ function makeReadDb(reads: {
             return { results: (reads.trendRows ?? []) as unknown as T[] };
           }
           if (s.includes("feed_entries fe JOIN")) {
-            return { results: (reads.entries ?? []) as unknown as T[] };
+            // `summary IS NULL` を含むクエリ（要約段）は未要約エントリだけ返す。
+            const entries = reads.entries ?? [];
+            const rows = s.includes("summary IS NULL")
+              ? entries.filter((e) => e.summary == null)
+              : entries;
+            return { results: rows as unknown as T[] };
           }
           if (s.includes("FROM interest_axes")) {
             return { results: (reads.axes ?? []) as unknown as T[] };
@@ -600,6 +607,79 @@ describe("summarizeFeed", () => {
 
     expect(ops.filter((o) => o.kind === "update-summary")).toHaveLength(1);
     expect(result).toMatchObject({ summarized: 1, summaryFailed: 1 });
+  });
+
+  it("is retry-progressive: processes only NULL-summary entries (skips already-summarized)", async () => {
+    // Simulate a prior partial run: entry 2 already has a summary; only entry 1 is NULL.
+    const mixed: EntryRow[] = [
+      { article_id: 1, title: "t1", source: FEED_SRC, url: "https://x/1", summary: null },
+      { article_id: 2, title: "t2", source: FEED_SRC, url: "https://x/2", summary: "既存要約" },
+    ];
+    const { db, ops } = makeReadDb({ entries: mixed });
+    const resolveFeedBody = vi.fn(async () => "body");
+
+    const result = await summarizeFeed(
+      db,
+      ai(vi.fn(async () => ({ response: "要約" }))),
+      DIGEST,
+      "2026-07-08",
+      { bodyFetchers: { resolveFeedBody }, sleep: noSleep },
+    );
+
+    // Only the un-summarized entry is touched (no re-work of entry 2).
+    expect(resolveFeedBody).toHaveBeenCalledTimes(1);
+    expect(resolveFeedBody).toHaveBeenCalledWith({ url: "https://x/1" });
+    const updates = ops.filter((o) => o.kind === "update-summary");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].args[2]).toBe(1);
+    expect(result).toMatchObject({ summarized: 1, summaryFailed: 0 });
+  });
+
+  it("persists each summary immediately (per-entry UPDATE, not batched at the end)", async () => {
+    // The UPDATE for entry 1 must happen before entry 2 is even fetched — proving
+    // partial progress is durable if the step is interrupted mid-loop.
+    const order: string[] = [];
+    const resolveFeedBody = vi.fn(async ({ url }: { url: string }) => {
+      order.push(`fetch:${url}`);
+      return "body";
+    });
+    const entries2: EntryRow[] = [
+      { article_id: 1, title: "t1", source: FEED_SRC, url: "https://x/1" },
+      { article_id: 2, title: "t2", source: FEED_SRC, url: "https://x/2" },
+    ];
+    const { db } = makeReadDb({ entries: entries2 });
+    // Wrap prepare to record UPDATE order interleaved with fetches.
+    const realPrepare = db.prepare.bind(db);
+    (db as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      const stmt = realPrepare(sql) as {
+        bind: (...a: unknown[]) => unknown;
+        run: () => Promise<unknown>;
+      };
+      if (/^UPDATE feed_entries SET summary/i.test(sql.trim())) {
+        const origBind = stmt.bind.bind(stmt);
+        stmt.bind = (...a: unknown[]) => {
+          order.push(`update:${a[2]}`);
+          return origBind(...a);
+        };
+      }
+      return stmt;
+    };
+
+    await summarizeFeed(
+      db,
+      ai(vi.fn(async () => ({ response: "要約" }))),
+      DIGEST,
+      "2026-07-08",
+      { bodyFetchers: { resolveFeedBody }, sleep: noSleep },
+    );
+
+    // entry 1 fetched → entry 1 updated → entry 2 fetched → entry 2 updated.
+    expect(order).toEqual([
+      "fetch:https://x/1",
+      "update:1",
+      "fetch:https://x/2",
+      "update:2",
+    ]);
   });
 });
 

@@ -5,10 +5,12 @@
  * （接続非依存）。`env.DAILY_PASS.create()` でインスタンスを起動し、進捗は
  * `instance.status()` で照会する（index.ts の GET /runs/{id}）。
  *
- * step 分割の要点は daily.ts のヘッダ（原文非永続・冪等性）に従う。時刻は run() 本体で
+ * step 分割の要点は daily.ts のヘッダ（原文非永続・冪等性）に従う。run() 本体では
  * `new Date()` を呼ばない — run() 本体は step リプレイのたびに再実行されるため、
- * `event.timestamp`（readonly なイベント時刻 = インスタンス生成時刻。replay で不変）を
- * 唯一の時刻源にして windowStart / date を導出する。
+ * windowStart / date は `event.timestamp`（readonly なイベント時刻 = インスタンス生成
+ * 時刻。replay で不変）だけから導出する。なお、記事の作業ウィンドウ絞り込みや created_at
+ * などは各 step 内の D1 クエリが SQLite の `datetime('now')` を使う（そちらは step 実行時
+ * 刻・冪等な範囲条件なので replay 差異の問題にならない）。この分担を混同しないこと。
  */
 
 import {

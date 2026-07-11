@@ -106,11 +106,15 @@ const WORKING_SET_SQL =
 
 const AXES_SQL = "SELECT axis_id, embedding, embedding_model FROM interest_axes";
 
-/** 当日フィードのエントリ（要約段の対象。title/source/url はメタで永続済み）。 */
+/**
+ * 当日フィードの未要約エントリ（要約段の対象。title/source/url はメタで永続済み）。
+ * summary IS NULL に絞るのは、step 再実行時に要約済みを飛ばして未了分だけ進めるため
+ * （ingest の embedding=NULL のみ処理と同じ設計思想）。
+ */
 const ENTRIES_FOR_DATE_SQL =
   "SELECT fe.article_id AS article_id, a.title AS title, a.source AS source, " +
   "a.url AS url FROM feed_entries fe JOIN articles a ON a.id = fe.article_id " +
-  "WHERE fe.date = ? ORDER BY fe.rank";
+  "WHERE fe.date = ? AND fe.summary IS NULL ORDER BY fe.rank";
 
 /** 当日フィードの hit_axis と title（傾向段の集計元。どちらもメタ）。 */
 const TREND_SOURCE_SQL =
@@ -465,21 +469,23 @@ export async function summarizeFeed(
     feedSummary: null,
   }));
 
+  // per-entry: 要約できた 1 件ずつ即 UPDATE して部分進捗を永続化する（onSummary）。
+  // これで step 再実行時は summary IS NULL の残りだけを処理できる（前進性）。
   const { summaries, failed } = await summarizeEntries(
     ai,
     digest,
     targets,
     (target) => bodyFetchers.resolveFeedBody({ url: target.url }),
     deps.sleep,
+    async (articleId, summary) => {
+      await db
+        .prepare(
+          "UPDATE feed_entries SET summary = ? WHERE date = ? AND article_id = ?",
+        )
+        .bind(summary, date, articleId)
+        .run();
+    },
   );
-  for (const [articleId, summary] of summaries) {
-    await db
-      .prepare(
-        "UPDATE feed_entries SET summary = ? WHERE date = ? AND article_id = ?",
-      )
-      .bind(summary, date, articleId)
-      .run();
-  }
 
   return { summarized: summaries.size, summaryFailed: failed };
 }
