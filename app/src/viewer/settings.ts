@@ -186,14 +186,14 @@ function renderForm(
     `<h2>関心軸</h2>` +
     `<p class="note">トピックのラベルだけ入力してください（日本語可）。関心記述文とベクトルは次回の日次パスがラベルから自動生成します。ラベルを変えると次回パスで再生成されます。</p>` +
     axisFields +
-    `<label>トピックを追加（1 行 1 件）</label>` +
+    `<label>トピックを追加（1 行 1 件。Enter は改行 — 反映は下の「保存」）</label>` +
     `<textarea name="newTopics" rows="4"></textarea>` +
     `<h2>ソース</h2>` +
     `<p class="note">購読するフィードの URL を 1 行 1 件で入力してください（RSS/Atom。ブログ / Medium 著者 / ニュースレター等）。</p>` +
     `<label>フィード URL（1 行 1 件）</label>` +
     `<textarea name="feeds" rows="8">${escapeHtml(model.feeds)}</textarea>` +
-    `<h2>スコアリング（表示のみ）</h2><ul>${scoringRows}</ul>` +
     `<p><button type="submit">保存</button></p>` +
+    `<h2>スコアリング（表示のみ）</h2><ul>${scoringRows}</ul>` +
     `</form>`;
 
   return page("設定", body);
