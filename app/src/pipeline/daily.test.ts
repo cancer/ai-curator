@@ -13,6 +13,9 @@ import type { NormalizedArticle } from "../adapters/types";
 import type { EmbeddingResult } from "../lib/embedding";
 import type { SummaryTarget } from "../lib/summarize";
 
+const FEED_URL = "https://feed.example/rss";
+const FEED_SRC = `feed:${FEED_URL}`;
+
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     interestAxes: [
@@ -21,14 +24,12 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     ],
     sources: {
       feeds: [],
-      githubRepos: [],
-      hnMinPoints: 0,
     },
     scoring: {
       weights: { interest: 0.6, freshness: 0.3, sourceTrust: 0.1 },
       freshnessHalfLifeDays: 7,
       semanticDedupThreshold: 0.9,
-      sourceTrust: { github: 1.0, hn: 0.4, feed: 0.7 },
+      sourceTrust: { feed: 0.7 },
     },
     embedding: { model: "m", maxInputChars: 1000 },
     digest: { model: "d", maxOutputTokens: 300 },
@@ -126,7 +127,7 @@ function row(overrides: Partial<ArticleRow> = {}): ArticleRow {
   return {
     id: 1,
     title: "t",
-    source: "hn",
+    source: FEED_SRC,
     url: "https://example.invalid/1",
     published_at: "2026-07-08T00:00:00.000Z",
     embedding: null,
@@ -149,15 +150,12 @@ const now = () => new Date("2026-07-08T21:00:00.000Z");
 /** ソースを何も返さない Fetchers（buildSourceTasks/runDaily の既定注入用）。 */
 function emptyFetchers(): Fetchers {
   return {
-    fetchReleases: vi.fn(async () => []),
-    fetchStories: vi.fn(async () => []),
     fetchFeed: vi.fn(async () => []),
   };
 }
 
 const noBodyFetchers: BodyFetchers = {
   resolveFeedBody: async () => null,
-  fetchHnBody: async () => "",
 };
 
 afterEach(() => {
@@ -165,24 +163,20 @@ afterEach(() => {
 });
 
 describe("buildSourceTasks", () => {
-  it("wires config sources to fetchers with parsed args and injected windowStart", () => {
+  it("wires config feeds to fetchFeed with injected windowStart", () => {
     const windowStart = new Date("2026-07-08T00:00:00.000Z");
     const config = makeConfig({
       sources: {
         feeds: ["https://a.example/rss", "https://b.example/atom"],
-        githubRepos: ["owner/repo1"],
-        hnMinPoints: 50,
       },
     });
     const fetchers = emptyFetchers();
 
     const tasks = buildSourceTasks(config, fetchers, windowStart);
-    // 1 github + 1 hn + 2 feeds = 4
-    expect(tasks).toHaveLength(4);
+    // 2 feeds = 2 tasks
+    expect(tasks).toHaveLength(2);
     for (const task of tasks) task.fetch();
 
-    expect(fetchers.fetchReleases).toHaveBeenCalledWith("owner", "repo1", windowStart);
-    expect(fetchers.fetchStories).toHaveBeenCalledWith(50, windowStart);
     expect(fetchers.fetchFeed).toHaveBeenCalledWith("https://a.example/rss", windowStart);
     expect(fetchers.fetchFeed).toHaveBeenCalledWith("https://b.example/atom", windowStart);
   });
@@ -193,68 +187,45 @@ describe("makeBodyResolver", () => {
     return {
       articleId: 1,
       title: "t",
-      source: "hn",
+      source: FEED_SRC,
       url: "https://example.invalid/a",
       feedSummary: null,
       ...overrides,
     };
   }
 
-  it("uses in-memory body without fetching (github release note / feed inline content)", async () => {
+  it("uses in-memory body without fetching (feed inline content)", async () => {
     const resolveFeedBody = vi.fn(async () => "should-not-be-called");
-    const fetchHnBody = vi.fn(async () => "should-not-be-called");
     const memById = new Map([[7, { body: "MEMORY_BODY" }]]);
-    const resolve = makeBodyResolver(memById, { resolveFeedBody, fetchHnBody });
+    const resolve = makeBodyResolver(memById, { resolveFeedBody });
 
-    const body = await resolve(target({ articleId: 7, source: "github:o/r" }));
+    const body = await resolve(target({ articleId: 7 }));
 
     expect(body).toBe("MEMORY_BODY");
     expect(resolveFeedBody).not.toHaveBeenCalled();
-    expect(fetchHnBody).not.toHaveBeenCalled();
   });
 
-  it("resolves feed articles via resolveFeedBody when no in-memory body", async () => {
+  it("resolves via resolveFeedBody when no in-memory body", async () => {
     const resolveFeedBody = vi.fn(async () => "FEED_BODY");
-    const resolve = makeBodyResolver(new Map(), {
-      resolveFeedBody,
-      fetchHnBody: async () => "",
-    });
+    const resolve = makeBodyResolver(new Map(), { resolveFeedBody });
 
     const body = await resolve(
-      target({ source: "feed:https://x.example/rss", url: "https://x.example/a" }),
+      target({ url: "https://x.example/a", feedSummary: "s" }),
     );
 
     expect(body).toBe("FEED_BODY");
     expect(resolveFeedBody).toHaveBeenCalledTimes(1);
+    expect(resolveFeedBody).toHaveBeenCalledWith({
+      url: "https://x.example/a",
+      feedSummary: "s",
+    });
   });
 
-  it("fetches the external link for hn but skips self-post item pages", async () => {
-    const fetchHnBody = vi.fn(async () => "EXTERNAL_BODY");
+  it("returns null when resolveFeedBody yields null (falls back downstream)", async () => {
     const resolve = makeBodyResolver(new Map(), {
       resolveFeedBody: async () => null,
-      fetchHnBody,
     });
-
-    const external = await resolve(
-      target({ source: "hn", url: "https://example.invalid/post" }),
-    );
-    const selfPost = await resolve(
-      target({ source: "hn", url: "https://news.ycombinator.com/item?id=42" }),
-    );
-
-    expect(external).toBe("EXTERNAL_BODY");
-    expect(selfPost).toBeNull();
-    expect(fetchHnBody).toHaveBeenCalledTimes(1);
-  });
-
-  it("returns null when a link fetch yields empty (falls back downstream)", async () => {
-    const resolve = makeBodyResolver(new Map(), {
-      resolveFeedBody: async () => null,
-      fetchHnBody: async () => "",
-    });
-    const body = await resolve(
-      target({ source: "hn", url: "https://example.invalid/x" }),
-    );
+    const body = await resolve(target({ url: "https://example.invalid/x" }));
     expect(body).toBeNull();
   });
 });
@@ -264,7 +235,7 @@ describe("runDaily — single pass orchestration", () => {
     return {
       url: "https://example.invalid/x",
       title: "t",
-      source: "hn",
+      source: FEED_SRC,
       publishedAt: "2026-07-08T00:00:00.000Z",
       ...overrides,
     };
@@ -273,38 +244,51 @@ describe("runDaily — single pass orchestration", () => {
   it("fetches, inserts metadata only, embeds, dedups, scores, writes ranked feed + all-entries summaries + trends", async () => {
     const fetchers = emptyFetchers();
     // Distinct, longer text so SimHash does not treat them as near-duplicates.
-    fetchers.fetchStories = vi.fn(async () => [
+    fetchers.fetchFeed = vi.fn(async () => [
       normalized({
         url: "u1",
         title: "Imaginary framework reaches version one",
-        source: "hn",
-        feedSummary: "a self post about testing fictional widgets",
+        source: FEED_SRC,
+        feedSummary: "a post about testing fictional widgets",
       }),
-    ]);
-    fetchers.fetchFeed = vi.fn(async () => [
       normalized({
         url: "u2",
         title: "Why my pretend cache never warms up",
-        source: "feed:https://feed.example/rss",
+        source: FEED_SRC,
         feedSummary: "notes on invented cache warming strategies",
         body: "BODY2",
       }),
-    ]);
-    fetchers.fetchReleases = vi.fn(async () => [
       normalized({
         url: "u3",
         title: "Sprocket release notes for the flux module",
-        source: "github:o/r",
+        source: FEED_SRC,
         feedSummary: "adds the imaginary flux capacitor module",
         body: "BODY3",
       }),
     ]);
 
     // Working set (what the DB returns after insert): the three fetched articles.
+    // published_at differentiates freshness so ranking is deterministic even though
+    // all three share the same source trust (feed).
     const workingSet = [
-      row({ id: 1, title: "t1", source: "hn", url: "u1" }),
-      row({ id: 2, title: "t2", source: "feed:https://feed.example/rss", url: "u2" }),
-      row({ id: 3, title: "t3", source: "github:o/r", url: "u3" }),
+      row({
+        id: 1,
+        title: "t1",
+        url: "u1",
+        published_at: "2026-07-07T21:00:00.000Z",
+      }),
+      row({
+        id: 2,
+        title: "t2",
+        url: "u2",
+        published_at: "2026-07-08T21:00:00.000Z",
+      }),
+      row({
+        id: 3,
+        title: "t3",
+        url: "u3",
+        published_at: "2026-07-08T00:00:00.000Z",
+      }),
     ];
     const axes: AxisRow[] = [
       { axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" },
@@ -326,14 +310,11 @@ describe("runDaily — single pass orchestration", () => {
       fetchers,
       bodyFetchers: {
         resolveFeedBody: async () => "should-not-be-called",
-        fetchHnBody: async () => "HN_LINK_BODY",
       },
       loadConfig: async () =>
         makeConfig({
           sources: {
-            feeds: ["https://feed.example/rss"],
-            githubRepos: ["o/r"],
-            hnMinPoints: 0,
+            feeds: [FEED_URL],
           },
         }),
       syncInterestAxes: vi.fn(async () => {}),
@@ -360,7 +341,8 @@ describe("runDaily — single pass orchestration", () => {
     expect(entryOps[0].kind).toBe("delete-entries");
     const feedInserts = db.ops.filter((o) => o.kind === "insert-entry");
     expect(feedInserts).toHaveLength(3);
-    // Rank by score desc: a2 (web) > a1 (hn) > a3 (orthogonal). args: [date, article_id, rank]
+    // Rank by score desc: a2 (web, freshest) > a1 (ai, older) > a3 (orthogonal).
+    // args: [date, article_id, rank]
     const byRank = new Map(feedInserts.map((o) => [o.args[2], o.args[1]]));
     expect(byRank.get(1)).toBe(2);
     expect(byRank.get(2)).toBe(1);
@@ -392,16 +374,16 @@ describe("runDaily — single pass orchestration", () => {
     });
 
     const fetchers = emptyFetchers();
-    fetchers.fetchStories = vi.fn(async () => [
+    fetchers.fetchFeed = vi.fn(async () => [
       normalized({
         url: "u1",
         title: "t1",
-        source: "hn",
+        source: FEED_SRC,
         feedSummary: "SENTINEL_FEED_SUMMARY",
         body: "SENTINEL_BODY",
       }),
     ]);
-    const workingSet = [row({ id: 1, title: "t1", source: "hn", url: "u1" })];
+    const workingSet = [row({ id: 1, title: "t1", url: "u1" })];
     const axes: AxisRow[] = [{ axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" }];
     const db = makeFakeDb(workingSet, axes);
     const env = { AI: { run: vi.fn(async () => ({ response: "要約" })) } } as unknown as Env;
@@ -411,14 +393,11 @@ describe("runDaily — single pass orchestration", () => {
       fetchers,
       bodyFetchers: {
         resolveFeedBody: async () => "SENTINEL_BODY",
-        fetchHnBody: async () => "SENTINEL_BODY",
       },
       loadConfig: async () =>
         makeConfig({
           sources: {
-            feeds: [],
-            githubRepos: [],
-            hnMinPoints: 0,
+            feeds: [FEED_URL],
           },
         }),
       syncInterestAxes: vi.fn(async () => {}),
@@ -437,12 +416,12 @@ describe("runDaily — single pass orchestration", () => {
 
   it("re-run is idempotent: skips embedding for already-embedded articles but rebuilds the feed", async () => {
     const fetchers = emptyFetchers();
-    fetchers.fetchStories = vi.fn(async () => [
-      normalized({ url: "u1", title: "t1", source: "hn", feedSummary: "s1" }),
+    fetchers.fetchFeed = vi.fn(async () => [
+      normalized({ url: "u1", title: "t1", source: FEED_SRC, feedSummary: "s1" }),
     ]);
     // Working set already has an embedding (second-run scenario).
     const workingSet = [
-      row({ id: 1, title: "t1", source: "hn", url: "u1", embedding: "[1,0,0]", embedding_model: "m" }),
+      row({ id: 1, title: "t1", url: "u1", embedding: "[1,0,0]", embedding_model: "m" }),
     ];
     const axes: AxisRow[] = [{ axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" }];
     const db = makeFakeDb(workingSet, axes);
@@ -453,7 +432,7 @@ describe("runDaily — single pass orchestration", () => {
       db: db as unknown as D1Database,
       fetchers,
       bodyFetchers: noBodyFetchers,
-      loadConfig: async () => makeConfig(),
+      loadConfig: async () => makeConfig({ sources: { feeds: [FEED_URL] } }),
       syncInterestAxes: vi.fn(async () => {}),
       embed,
       sleep: noSleep,
@@ -472,13 +451,13 @@ describe("runDaily — single pass orchestration", () => {
 
   it("keeps going when one article's embedding fails (skip, no total wipe)", async () => {
     const fetchers = emptyFetchers();
-    fetchers.fetchStories = vi.fn(async () => [
-      normalized({ url: "u1", title: "落ちる記事", source: "hn", feedSummary: "s1" }),
-      normalized({ url: "u2", title: "通る記事", source: "github:o/r", feedSummary: "s2", body: "b" }),
+    fetchers.fetchFeed = vi.fn(async () => [
+      normalized({ url: "u1", title: "落ちる記事", source: FEED_SRC, feedSummary: "s1" }),
+      normalized({ url: "u2", title: "通る記事", source: FEED_SRC, feedSummary: "s2", body: "b" }),
     ]);
     const workingSet = [
-      row({ id: 1, title: "落ちる記事", source: "hn", url: "u1" }),
-      row({ id: 2, title: "通る記事", source: "github:o/r", url: "u2" }),
+      row({ id: 1, title: "落ちる記事", url: "u1" }),
+      row({ id: 2, title: "通る記事", url: "u2" }),
     ];
     const axes: AxisRow[] = [{ axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" }];
     const db = makeFakeDb(workingSet, axes);
@@ -492,7 +471,7 @@ describe("runDaily — single pass orchestration", () => {
       db: db as unknown as D1Database,
       fetchers,
       bodyFetchers: noBodyFetchers,
-      loadConfig: async () => makeConfig(),
+      loadConfig: async () => makeConfig({ sources: { feeds: [FEED_URL] } }),
       syncInterestAxes: vi.fn(async () => {}),
       embed,
       sleep: noSleep,
@@ -507,13 +486,13 @@ describe("runDaily — single pass orchestration", () => {
 
   it("keeps going when one article's summary fails (excluded, others still summarized)", async () => {
     const fetchers = emptyFetchers();
-    fetchers.fetchStories = vi.fn(async () => [
-      normalized({ url: "u1", title: "落ちる記事", source: "hn", feedSummary: "s1" }),
-      normalized({ url: "u2", title: "通る記事", source: "hn", feedSummary: "s2" }),
+    fetchers.fetchFeed = vi.fn(async () => [
+      normalized({ url: "u1", title: "落ちる記事", source: FEED_SRC, feedSummary: "s1" }),
+      normalized({ url: "u2", title: "通る記事", source: FEED_SRC, feedSummary: "s2" }),
     ]);
     const workingSet = [
-      row({ id: 1, title: "落ちる記事", source: "hn", url: "u1" }),
-      row({ id: 2, title: "通る記事", source: "hn", url: "u2" }),
+      row({ id: 1, title: "落ちる記事", url: "u1" }),
+      row({ id: 2, title: "通る記事", url: "u2" }),
     ];
     const axes: AxisRow[] = [{ axis_id: "ai", embedding: "[1,0,0]", embedding_model: "m" }];
     const db = makeFakeDb(workingSet, axes);
@@ -532,7 +511,7 @@ describe("runDaily — single pass orchestration", () => {
       db: db as unknown as D1Database,
       fetchers,
       bodyFetchers: noBodyFetchers,
-      loadConfig: async () => makeConfig(),
+      loadConfig: async () => makeConfig({ sources: { feeds: [FEED_URL] } }),
       syncInterestAxes: vi.fn(async () => {}),
       embed: embedReturning([[1, 0, 0], [0, 1, 0]]),
       sleep: noSleep,
@@ -548,8 +527,8 @@ describe("runDaily — single pass orchestration", () => {
 
   it("throws only when every source fails", async () => {
     const fetchers = emptyFetchers();
-    fetchers.fetchStories = vi.fn(async () => {
-      throw new Error("hn down");
+    fetchers.fetchFeed = vi.fn(async () => {
+      throw new Error("feed down");
     });
     const db = makeFakeDb([], []);
     const env = { AI: { run: vi.fn() } } as unknown as Env;
@@ -562,9 +541,7 @@ describe("runDaily — single pass orchestration", () => {
         loadConfig: async () =>
           makeConfig({
             sources: {
-              feeds: [],
-              githubRepos: [],
-              hnMinPoints: 0,
+              feeds: [FEED_URL],
             },
           }),
         syncInterestAxes: vi.fn(async () => {}),

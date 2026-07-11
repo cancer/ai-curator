@@ -12,9 +12,6 @@
 
 import type { Env } from "./index";
 
-/** GitHub リポジトリ指定の形式（owner/repo、スラッシュ・空白を含まない 2 要素）。 */
-const REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
-
 /**
  * 関心軸。ユーザーはラベル（自然言語のトピック名）だけを与える。関心記述文と
  * そのベクトルは日次パスが label から自動生成する（seedText は廃止）。id は不変
@@ -28,12 +25,10 @@ export interface InterestAxis {
 
 /**
  * 取得ソース。feeds は任意の RSS/Atom フィード URL のリスト（汎用アダプタが処理）。
- * 従来の medium/fowler 専用フィールドは feeds に統合した。
+ * 全ソースを feed に一本化した（github/hn の専用ソースは廃止）。
  */
 export interface Sources {
   feeds: string[];
-  githubRepos: string[];
-  hnMinPoints: number;
 }
 
 export interface ScoringWeights {
@@ -43,13 +38,10 @@ export interface ScoringWeights {
 }
 
 /**
- * ソース種別ごとの信頼度。種別は source 文字列の `:` より前（`feed:{url}`→`feed`,
- * `github:{owner/repo}`→`github`, `hn`→`hn`）。任意フィードは 1 本ずつ質を測れない
- * ため feed でひとまとめにする。
+ * ソース種別ごとの信頼度。種別は source 文字列の `:` より前（`feed:{url}`→`feed`）。
+ * 任意フィードは 1 本ずつ質を測れないため feed でひとまとめにする。
  */
 export interface SourceTrustScores {
-  github: number;
-  hn: number;
   feed: number;
 }
 
@@ -104,8 +96,6 @@ export const SYSTEM_CONFIG: SystemConfig = {
     freshnessHalfLifeDays: 3,
     semanticDedupThreshold: 0.9,
     sourceTrust: {
-      github: 1.0,
-      hn: 0.5,
       feed: 0.7,
     },
   },
@@ -136,8 +126,6 @@ export const DEFAULT_USER_CONFIG: UserConfig = {
       "https://martinfowler.com/feed.atom",
       "https://medium.com/feed/@examplauthor",
     ],
-    githubRepos: ["facebook/react", "withastro/astro"],
-    hnMinPoints: 50,
   },
 };
 
@@ -175,10 +163,7 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
-/**
- * Validate Sources（feeds は http(s) URL・githubRepos は owner/repo・
- * hnMinPoints は非負整数）。
- */
+/** Validate Sources（feeds は http(s) URL の配列）。 */
 function validateSources(sources: unknown): Sources {
   if (!sources || typeof sources !== "object") {
     throw new Error("sources must be an object");
@@ -198,30 +183,8 @@ function validateSources(sources: unknown): Sources {
     }
   }
 
-  if (!Array.isArray(obj.githubRepos)) {
-    throw new Error("sources.githubRepos must be an array");
-  }
-
-  for (const repo of obj.githubRepos) {
-    if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) {
-      throw new Error(
-        `sources.githubRepos entries must be "owner/repo" strings: ${JSON.stringify(repo)}`
-      );
-    }
-  }
-
-  if (typeof obj.hnMinPoints !== "number") {
-    throw new Error("sources.hnMinPoints must be a number");
-  }
-
-  if (!Number.isInteger(obj.hnMinPoints) || obj.hnMinPoints < 0) {
-    throw new Error("sources.hnMinPoints must be a non-negative integer");
-  }
-
   return {
     feeds: obj.feeds as string[],
-    githubRepos: obj.githubRepos as string[],
-    hnMinPoints: obj.hnMinPoints,
   };
 }
 

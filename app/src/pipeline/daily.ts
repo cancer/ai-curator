@@ -15,7 +15,7 @@
  *  4. 関心軸同期
  *  5. Embedding（当日ウィンドウ・embedding 未生成のみ。入力はメモリの feedSummary）
  *  6. 意味的 Dedup → スコアリング → feed_entries 当日分 delete→insert
- *  7. 全件要約（body はメモリ or fowler/hn を取得）→ feed_entries.summary
+ *  7. 全件要約（body はメモリ or リンク先の粗抽出）→ feed_entries.summary
  *  8. 傾向サマリ feed_trends（当日分 delete→insert）
  *
  * レジリエンス: ソース単位 try/catch（全滅時のみ throw）、embedding は per-article
@@ -40,8 +40,6 @@ import {
   summarizeTrend,
   type SummaryTarget,
 } from "../lib/summarize";
-import { fetchReleases } from "../adapters/github";
-import { fetchStories, fetchArticleBody as fetchHnArticleBody } from "../adapters/hn";
 import { fetchFeed, resolveFeedBody } from "../adapters/feed";
 
 /** 当日ウィンドウの長さ（時間）。下限 = 実行時刻 - この時間。 */
@@ -55,29 +53,19 @@ const EMBED_SPACING_MS = 150;
  * いずれも windowStart（当日ウィンドウ下限）を受け取り、その範囲内を全件返す。
  */
 export interface Fetchers {
-  fetchReleases(
-    owner: string,
-    repo: string,
-    windowStart: Date,
-  ): Promise<NormalizedArticle[]>;
-  fetchStories(minPoints: number, windowStart: Date): Promise<NormalizedArticle[]>;
   /** 汎用 RSS/Atom フィード。任意の feed URL を扱う。 */
   fetchFeed(feedUrl: string, windowStart: Date): Promise<NormalizedArticle[]>;
 }
 
 const defaultFetchers: Fetchers = {
-  fetchReleases: (owner, repo, windowStart) =>
-    fetchReleases(owner, repo, windowStart),
-  fetchStories: (minPoints, windowStart) => fetchStories(minPoints, windowStart),
   fetchFeed: (feedUrl, windowStart) => fetchFeed(feedUrl, windowStart),
 };
 
 /**
  * 要約段で本文を解決する関数群（テストで差し替え可能）。
- * github の release note とフィードのインライン本文はメモリにあるためここでは扱わず、
- * 前段でメモリ保持した body を使う。ここに来るのは:
- * - feed: インライン本文が無い記事（feedSummary or リンク先の粗抽出に落ちる）
- * - hn: 外部リンク先の粗抽出
+ * フィードのインライン本文はメモリにあるためここでは扱わず、前段でメモリ保持した
+ * body を使う。ここに来るのはインライン本文が無い記事
+ * （feedSummary or リンク先の粗抽出に落ちる）。
  */
 export interface BodyFetchers {
   resolveFeedBody(article: {
@@ -85,12 +73,10 @@ export interface BodyFetchers {
     feedSummary?: string;
     body?: string;
   }): Promise<string | null>;
-  fetchHnBody(url: string): Promise<string>;
 }
 
 const defaultBodyFetchers: BodyFetchers = {
   resolveFeedBody: (article) => resolveFeedBody(article),
-  fetchHnBody: (url) => fetchHnArticleBody(url),
 };
 
 /** 1 ソース分の取得タスク。label は失敗ログ・サマリ用の識別子。 */
@@ -119,19 +105,6 @@ export function buildSourceTasks(
 ): SourceTask[] {
   const { sources } = config;
   const tasks: SourceTask[] = [];
-
-  for (const repo of sources.githubRepos) {
-    const [owner, name] = repo.split("/");
-    tasks.push({
-      label: `github:${repo}`,
-      fetch: () => fetchers.fetchReleases(owner, name, windowStart),
-    });
-  }
-
-  tasks.push({
-    label: "hn",
-    fetch: () => fetchers.fetchStories(sources.hnMinPoints, windowStart),
-  });
 
   for (const feedUrl of sources.feeds) {
     tasks.push({
@@ -189,7 +162,7 @@ interface EmbeddedArticle {
   publishedAt: string;
   /** メモリ保持のフィード提供テキスト（DB には無い）。 */
   feedSummary: string | null;
-  /** メモリ保持の本文（github release note / medium content:encoded）。DB には無い。 */
+  /** メモリ保持の本文（フィードの content:encoded 等のインライン本文）。DB には無い。 */
   body: string | null;
   vector: number[];
   model: string;
@@ -205,16 +178,10 @@ function embeddingInput(title: string, feedSummary: string | null): string {
   return `${title}\n${feedSummary ?? ""}`;
 }
 
-/** HN self-post（外部リンクなし）の判定。item ページは要約に使わない。 */
-function isHackerNewsItemUrl(url: string): boolean {
-  return url.includes("news.ycombinator.com/item");
-}
-
 /**
- * 本文リゾルバを作る。単一パスなのでメモリ保持した body（github/medium 著者）が
- * あればそれを使い、無いものだけ取得する:
- * - fowler: 記事ページを抽出。連続 fetch は FOWLER_ARTICLE_SPACING_MS 以上空ける。
- * - hn: 外部リンクを粗抽出（self-post = item ページは取得せず story_text へ）。
+ * 本文リゾルバを作る。単一パスなのでメモリ保持した body（フィードのインライン本文）が
+ * あればそれを使い、無いものだけ取得する。インライン本文が無い場合は feedSummary が
+ * あればそれ、無ければリンク先を粗抽出（resolveFeedBody 内で判断）。
  * 取得できない/空は null を返し、summarizeEntries が feedSummary→title に落とす。
  */
 export function makeBodyResolver(
@@ -227,28 +194,10 @@ export function makeBodyResolver(
       return memory.body;
     }
 
-    // source は `feed:{url}` / `github:{owner/repo}` / `hn`。`:` より前が種別。
-    const kind = target.source.split(":")[0];
-
-    if (kind === "feed") {
-      // インライン本文はメモリで処理済み。feedSummary があればそれ、無ければ
-      // リンク先を粗抽出（resolveFeedBody 内で判断）。
-      return bodyFetchers.resolveFeedBody({
-        url: target.url,
-        feedSummary: target.feedSummary ?? undefined,
-      });
-    }
-
-    if (kind === "hn") {
-      // self-post（item ページ）は外部本文が無いので story_text→title に落とす。
-      if (isHackerNewsItemUrl(target.url)) {
-        return null;
-      }
-      const body = await bodyFetchers.fetchHnBody(target.url);
-      return body === "" ? null : body;
-    }
-
-    return null;
+    return bodyFetchers.resolveFeedBody({
+      url: target.url,
+      feedSummary: target.feedSummary ?? undefined,
+    });
   };
 }
 
@@ -464,7 +413,7 @@ export async function runDaily(env: Env, deps: DailyDeps = {}): Promise<void> {
       .run();
   }
 
-  // 7. 全件の要約。本文はメモリ or fowler/hn 取得（失敗は feedSummary→title）。
+  // 7. 全件の要約。本文はメモリ or リンク先の粗抽出（失敗は feedSummary→title）。
   const memById = new Map<number, { body: string | null }>(
     embedded.map((a) => [a.id, { body: a.body }]),
   );

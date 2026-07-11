@@ -11,8 +11,6 @@ function baseUser(): UserConfig {
     ],
     sources: {
       feeds: ["https://martinfowler.com/feed.atom"],
-      githubRepos: ["owner/repo"],
-      hnMinPoints: 10,
     },
   };
 }
@@ -70,8 +68,6 @@ function validFields(): Record<string, string> {
     "axis-1-id": "web-fw",
     "axis-1-label": "Web FW",
     feeds: "https://martinfowler.com/feed.atom",
-    githubRepos: "owner/repo",
-    hnMinPoints: "10",
   };
 }
 
@@ -83,7 +79,6 @@ describe("renderSettingsForm", () => {
     const html = await res.text();
     expect(html).toContain('method="post"');
     expect(html).toContain("martinfowler.com/feed.atom");
-    expect(html).toContain("owner/repo");
     // scoring は SYSTEM_CONFIG の値を表示のみ（値が見えること）
     expect(html).toContain(String(SYSTEM_CONFIG.scoring.weights.interest));
   });
@@ -132,12 +127,8 @@ describe("handleSettingsUpdate", () => {
     expect(saved().interestAxes[0].id).toBe("ai");
     // KV には interestAxes / sources のみ書く（システム側は書かない）。
     expect(Object.keys(saved()).sort()).toEqual(["interestAxes", "sources"]);
-    // sources は feeds/githubRepos/hnMinPoints のみ。
-    expect(Object.keys(saved().sources).sort()).toEqual([
-      "feeds",
-      "githubRepos",
-      "hnMinPoints",
-    ]);
+    // sources は feeds のみ。
+    expect(Object.keys(saved().sources).sort()).toEqual(["feeds"]);
   });
 
   it("saves from the default form when KV is empty", async () => {
@@ -174,17 +165,6 @@ describe("handleSettingsUpdate", () => {
     expect(saved().interestAxes.map((a) => a.id)).toEqual(["ai"]);
   });
 
-  it("rejects an invalid repo format with 400 and preserves input", async () => {
-    const { env, puts } = makeEnv();
-    const fields = validFields();
-    fields.githubRepos = "not-a-valid-repo";
-    const res = await handleSettingsUpdate(env, postForm(fields));
-    expect(res.status).toBe(400);
-    expect(puts.length).toBe(0);
-    const html = await res.text();
-    expect(html).toContain("not-a-valid-repo");
-  });
-
   it("rejects an invalid feed URL with 400 and preserves input", async () => {
     const { env, puts } = makeEnv();
     const fields = validFields();
@@ -200,24 +180,6 @@ describe("handleSettingsUpdate", () => {
     const { env, puts } = makeEnv();
     const fields = validFields();
     fields["axis-0-label"] = "   ";
-    const res = await handleSettingsUpdate(env, postForm(fields));
-    expect(res.status).toBe(400);
-    expect(puts.length).toBe(0);
-  });
-
-  it("rejects a non-numeric hnMinPoints with 400", async () => {
-    const { env, puts } = makeEnv();
-    const fields = validFields();
-    fields.hnMinPoints = "abc";
-    const res = await handleSettingsUpdate(env, postForm(fields));
-    expect(res.status).toBe(400);
-    expect(puts.length).toBe(0);
-  });
-
-  it("rejects an empty hnMinPoints with 400 (Number('') === 0 must not slip through)", async () => {
-    const { env, puts } = makeEnv();
-    const fields = validFields();
-    fields.hnMinPoints = "   ";
     const res = await handleSettingsUpdate(env, postForm(fields));
     expect(res.status).toBe(400);
     expect(puts.length).toBe(0);

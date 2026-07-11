@@ -15,7 +15,7 @@ export interface NormalizedArticle {
   url: string;
   title: string;
   /**
-   * ソース識別子（例: `feed:{url}`, `github:{owner/repo}`, `hn`）。
+   * ソース識別子（例: `feed:{url}`）。
    * sourceTrust は `:` より前で引く（`feed:https://...`→`feed`）。
    */
   source: string;
@@ -38,9 +38,8 @@ export function ensureArray<T>(value: T | T[] | undefined): T[] {
 }
 
 /**
- * 当日ウィンドウ（publishedAt >= windowStart）の記事だけを残す。非ページングな
- * feed（medium / fowler）は取得分からこの関数で当日分に絞る。ページング API
- * （github / hn）はページ送りの停止条件やクエリで当日分に絞るため使わない。
+ * 当日ウィンドウ（publishedAt >= windowStart）の記事だけを残す。
+ * feed は取得分からこの関数で当日分に絞る。
  */
 export function withinWindow(
   articles: NormalizedArticle[],

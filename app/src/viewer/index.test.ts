@@ -28,14 +28,12 @@ function baseConfig(): Config {
     ],
     sources: {
       feeds: [],
-      githubRepos: [],
-      hnMinPoints: 10,
     },
     scoring: {
       weights: { interest: 0.6, freshness: 0.3, sourceTrust: 0.1 },
       freshnessHalfLifeDays: 7,
       semanticDedupThreshold: 0.9,
-      sourceTrust: { github: 1, hn: 0.5, feed: 0.7 },
+      sourceTrust: { feed: 0.7 },
     },
     embedding: { model: "m", maxInputChars: 1000 },
     digest: { model: "d", maxOutputTokens: 300 },

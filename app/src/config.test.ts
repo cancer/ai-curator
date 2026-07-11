@@ -10,7 +10,7 @@ import {
 import type { Env } from "./index";
 
 // KV に置くのは interestAxes / sources のみ（ユーザー可変データ）。
-// 関心軸はラベルのみ（seedText は廃止）。sources は feeds/githubRepos/hnMinPoints。
+// 関心軸はラベルのみ（seedText は廃止）。sources は feeds のみ。
 const validUser: UserConfig = {
   interestAxes: [
     { id: "web-fw", label: "Web フレームワーク" },
@@ -18,8 +18,6 @@ const validUser: UserConfig = {
   ],
   sources: {
     feeds: ["https://martinfowler.com/feed.atom", "https://example.com/rss"],
-    githubRepos: ["owner/repo1", "owner/repo2"],
-    hnMinPoints: 50,
   },
 };
 
@@ -186,60 +184,6 @@ describe("config", () => {
       );
     });
 
-    it("throws when sources.githubRepos is not an array", async () => {
-      const env = createMockEnv();
-      const user = {
-        ...validUser,
-        sources: { ...validUser.sources, githubRepos: "not-array" },
-      };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.githubRepos must be an array",
-      );
-    });
-
-    it("throws when githubRepos has a non owner/repo entry", async () => {
-      const env = createMockEnv();
-      const user = {
-        ...validUser,
-        sources: {
-          ...validUser.sources,
-          githubRepos: ["owner/repo", "not-a-repo"],
-        },
-      };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        'sources.githubRepos entries must be "owner/repo" strings',
-      );
-    });
-
-    it("throws when sources.hnMinPoints is negative", async () => {
-      const env = createMockEnv();
-      const user = {
-        ...validUser,
-        sources: { ...validUser.sources, hnMinPoints: -1 },
-      };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.hnMinPoints must be a non-negative integer",
-      );
-    });
-
-    it("throws when sources.hnMinPoints is not an integer", async () => {
-      const env = createMockEnv();
-      const user = {
-        ...validUser,
-        sources: { ...validUser.sources, hnMinPoints: 1.5 },
-      };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.hnMinPoints must be a non-negative integer",
-      );
-    });
   });
 
   describe("saveConfig", () => {
@@ -294,7 +238,6 @@ describe("config", () => {
         sources: {
           ...validUser.sources,
           feeds: [],
-          githubRepos: [],
         },
       };
 

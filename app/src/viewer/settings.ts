@@ -3,7 +3,7 @@
  * 更新を KV に書き戻す。
  *
  * 編集対象: 関心軸（トピックの label のみ・追加/削除）と
- * ソース（feeds / githubRepos / hnMinPoints）。
+ * ソース（feeds = 任意の RSS/Atom フィード URL のリスト）。
  * 関心軸のベクトルは日次パスが label から自動生成する（記述文の入力は不要）。
  * id はシステムが採番する不変キー — ユーザーは label だけ入力し、既存軸は hidden id で
  * round-trip、新規軸は保存時に crypto.randomUUID() を採番する。これによりラベルを
@@ -25,8 +25,6 @@ import {
 } from "../config";
 import { escapeHtml, page, htmlResponse } from "./layout";
 
-const REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
-
 /** フォーム上の軸。id は既存軸のみ持つ（新規は保存時に採番するため空）。 */
 interface AxisField {
   id: string;
@@ -37,16 +35,12 @@ interface AxisField {
 interface FormModel {
   axes: AxisField[];
   feeds: string;
-  githubRepos: string;
-  hnMinPoints: string;
 }
 
 function modelFromUserConfig(user: UserConfig): FormModel {
   return {
     axes: user.interestAxes.map((a) => ({ id: a.id, label: a.label })),
     feeds: user.sources.feeds.join("\n"),
-    githubRepos: user.sources.githubRepos.join("\n"),
-    hnMinPoints: String(user.sources.hnMinPoints),
   };
 }
 
@@ -89,8 +83,6 @@ function modelFromForm(form: FormData): FormModel {
   return {
     axes,
     feeds: String(form.get("feeds") ?? ""),
-    githubRepos: String(form.get("githubRepos") ?? ""),
-    hnMinPoints: String(form.get("hnMinPoints") ?? ""),
   };
 }
 
@@ -113,19 +105,6 @@ function validate(model: FormModel): string[] {
     }
   }
 
-  for (const repo of lines(model.githubRepos)) {
-    if (!REPO_PATTERN.test(repo)) {
-      errors.push(`GitHub リポジトリは owner/name 形式にしてください: "${repo}"`);
-    }
-  }
-
-  // Number("") は 0 になり素通りするため、trim 後に空・非数値を明示的に弾く。
-  const hnRaw = model.hnMinPoints.trim();
-  const hn = Number(hnRaw);
-  if (hnRaw === "" || !Number.isInteger(hn) || hn < 0) {
-    errors.push("hnMinPoints は 0 以上の整数にしてください");
-  }
-
   return errors;
 }
 
@@ -139,8 +118,6 @@ function buildUserConfig(model: FormModel): UserConfig {
     interestAxes,
     sources: {
       feeds: lines(model.feeds),
-      githubRepos: lines(model.githubRepos),
-      hnMinPoints: Number(model.hnMinPoints),
     },
   };
 }
@@ -208,12 +185,9 @@ function renderForm(
     `<p class="note">トピックのラベルだけ入力してください（日本語可）。関心記述文とベクトルは次回の日次パスがラベルから自動生成します。ラベルを変えると次回パスで再生成されます。</p>` +
     axisFields +
     `<h2>ソース</h2>` +
-    `<label>フィード URL（1 行 1 件・RSS/Atom。ブログ/ニュースレター等）</label>` +
-    `<textarea name="feeds" rows="6">${escapeHtml(model.feeds)}</textarea>` +
-    `<label>GitHub リポジトリ（1 行 1 件・owner/name）</label>` +
-    `<textarea name="githubRepos" rows="4">${escapeHtml(model.githubRepos)}</textarea>` +
-    `<label>Hacker News 最低ポイント</label>` +
-    `<input name="hnMinPoints" value="${escapeHtml(model.hnMinPoints)}" inputmode="numeric">` +
+    `<p class="note">購読するフィードの URL を 1 行 1 件で入力してください（RSS/Atom。ブログ / Medium 著者 / ニュースレター等）。</p>` +
+    `<label>フィード URL（1 行 1 件）</label>` +
+    `<textarea name="feeds" rows="8">${escapeHtml(model.feeds)}</textarea>` +
     `<h2>スコアリング（表示のみ）</h2><ul>${scoringRows}</ul>` +
     `<p><button type="submit">保存</button></p>` +
     `</form>`;
