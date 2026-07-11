@@ -4,7 +4,7 @@ import {
   saveConfig,
   loadUserConfigForForm,
   SYSTEM_CONFIG,
-  DEFAULT_USER_CONFIG,
+  EMPTY_USER_CONFIG,
   type UserConfig,
 } from "./config";
 import type { Env } from "./index";
@@ -259,25 +259,25 @@ describe("config", () => {
       expect(result).toEqual(validUser);
     });
 
-    it("returns DEFAULT_USER_CONFIG when KV is empty (does not throw)", async () => {
+    it("returns EMPTY_USER_CONFIG when KV is empty (does not throw)", async () => {
       const env = createMockEnv();
       vi.mocked(env.CONFIG.get as any).mockResolvedValue(null);
 
       const result = await loadUserConfigForForm(env);
 
-      expect(result).toEqual(DEFAULT_USER_CONFIG);
+      expect(result).toEqual(EMPTY_USER_CONFIG);
     });
 
-    it("returns DEFAULT_USER_CONFIG when KV JSON is invalid (does not throw)", async () => {
+    it("returns EMPTY_USER_CONFIG when KV JSON is invalid (does not throw)", async () => {
       const env = createMockEnv();
       vi.mocked(env.CONFIG.get as any).mockResolvedValue("broken {");
 
       const result = await loadUserConfigForForm(env);
 
-      expect(result).toEqual(DEFAULT_USER_CONFIG);
+      expect(result).toEqual(EMPTY_USER_CONFIG);
     });
 
-    it("returns DEFAULT_USER_CONFIG when KV value fails validation (does not throw)", async () => {
+    it("returns EMPTY_USER_CONFIG when KV value fails validation (does not throw)", async () => {
       const env = createMockEnv();
       vi.mocked(env.CONFIG.get as any).mockResolvedValue(
         JSON.stringify({ ...validUser, interestAxes: [] }),
@@ -285,16 +285,23 @@ describe("config", () => {
 
       const result = await loadUserConfigForForm(env);
 
-      expect(result).toEqual(DEFAULT_USER_CONFIG);
+      expect(result).toEqual(EMPTY_USER_CONFIG);
     });
   });
 
-  describe("DEFAULT_USER_CONFIG", () => {
-    it("is a valid UserConfig that can be saved", async () => {
+  describe("EMPTY_USER_CONFIG", () => {
+    it("is an empty scaffold (no hardcoded topics or feeds)", () => {
+      expect(EMPTY_USER_CONFIG.interestAxes).toEqual([]);
+      expect(EMPTY_USER_CONFIG.sources.feeds).toEqual([]);
+    });
+
+    it("is not directly saveable (no interest axis)", async () => {
       const env = createMockEnv();
       vi.mocked(env.CONFIG.put as any).mockResolvedValue(undefined);
 
-      await expect(saveConfig(env, DEFAULT_USER_CONFIG)).resolves.toBeUndefined();
+      await expect(saveConfig(env, EMPTY_USER_CONFIG)).rejects.toThrow(
+        "interestAxes must not be empty",
+      );
     });
   });
 });

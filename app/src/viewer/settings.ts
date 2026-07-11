@@ -9,7 +9,7 @@
  * round-trip、新規軸は保存時に crypto.randomUUID() を採番する。これによりラベルを
  * 変えても過去の hit_axis/feed_trends が孤立しない。
  * scoring 等のシステム側パラメータ（SYSTEM_CONFIG）は表示のみ（UI で変更しない）。
- * KV が空でも DEFAULT_USER_CONFIG でフォームを開ける。
+ * KV が空でも空のひな形（EMPTY_USER_CONFIG）でフォームを開ける。
  *
  * 素の HTML `<form method="post">` のみで完結させる（JS を必須にしない）。
  */

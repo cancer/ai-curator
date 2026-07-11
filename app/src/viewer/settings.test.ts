@@ -83,14 +83,15 @@ describe("renderSettingsForm", () => {
     expect(html).toContain(String(SYSTEM_CONFIG.scoring.weights.interest));
   });
 
-  it("opens with the default form even when KV is empty", async () => {
+  it("opens with an empty form when KV is empty", async () => {
     const { env } = makeEmptyEnv();
     const res = await renderSettingsForm(env);
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain('method="post"');
-    // DEFAULT_USER_CONFIG の既定関心軸（hidden id）が初期表示される。
-    expect(html).toContain("software-design");
+    // 空 KV では設定をコードに持たないので、フォームは空（追加用の空行のみ）で開く。
+    expect(html).toContain('name="feeds"');
+    expect(html).toContain('name="axis-0-label"');
   });
 
   it("renders a run-now button that posts to /run", async () => {

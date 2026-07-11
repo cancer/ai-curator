@@ -110,26 +110,15 @@ export const SYSTEM_CONFIG: SystemConfig = {
 };
 
 /**
- * 初回 `GET /settings` のフォーム初期表示用の既定 UserConfig。
- * 関心軸はラベル（トピック名）のみ。関心記述文とベクトルは日次パスが自動生成する。
- * 保存されるまで KV には入らない（フォームの雛形）。
+ * KV が空/不正なときに `GET /settings` を開くための空のひな形。
+ * 実際の設定（トピック・フィード）はコードに持たず、すべて KV に置く。
+ * これはあくまで「まだ何も無い」状態を表す空フォーム用で、そのままでは
+ * 保存できない（保存には関心軸が 1 つ以上必要）。
  */
-export const DEFAULT_USER_CONFIG: UserConfig = {
-  interestAxes: [
-    { id: "web-fw", label: "Web フレームワーク" },
-    { id: "ai", label: "AI" },
-    { id: "agentic-coding", label: "Agentic Coding" },
-    { id: "software-design", label: "Software Design" },
-  ],
+export const EMPTY_USER_CONFIG: UserConfig = {
+  interestAxes: [],
   sources: {
-    feeds: [
-      "https://medium.com/feed/tag/technology",
-      "https://news.ycombinator.com/rss",
-      "https://martinfowler.com/feed.atom",
-      "https://blog.cleancoder.com/atom.xml",
-      "https://tidyfirst.substack.com/feed",
-      "https://t-wada.hatenablog.jp/feed",
-    ],
+    feeds: [],
   },
 };
 
@@ -265,17 +254,17 @@ export async function saveConfig(env: Env, user: UserConfig): Promise<void> {
 
 /**
  * 設定画面の初期表示用。KV が存在し妥当なら KV の UserConfig を、
- * 無い・不正なら DEFAULT_USER_CONFIG を返す（throw しない。空 KV でもフォームを開ける）。
+ * 無い・不正なら EMPTY_USER_CONFIG（空フォーム）を返す（throw しない。空 KV でもフォームを開ける）。
  */
 export async function loadUserConfigForForm(env: Env): Promise<UserConfig> {
   const raw = await env.CONFIG.get("config:v1");
   if (!raw) {
-    return DEFAULT_USER_CONFIG;
+    return EMPTY_USER_CONFIG;
   }
 
   try {
     return validateUserConfig(JSON.parse(raw));
   } catch {
-    return DEFAULT_USER_CONFIG;
+    return EMPTY_USER_CONFIG;
   }
 }
