@@ -62,7 +62,7 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
-/** POST body から軸・ソースの生値を抽出する（削除・空の追加行は落とす）。 */
+/** POST body から軸・ソースの生値を抽出する（削除チェック済みの軸は落とす）。 */
 function modelFromForm(form: FormData): FormModel {
   const indices = new Set<number>();
   for (const key of form.keys()) {
@@ -75,9 +75,13 @@ function modelFromForm(form: FormData): FormModel {
     if (form.get(`axis-${i}-delete`) !== null) continue;
     const id = String(form.get(`axis-${i}-id`) ?? "").trim();
     const label = String(form.get(`axis-${i}-label`) ?? "").trim();
-    // 未入力の追加行はスキップする。
     if (id === "" && label === "") continue;
     axes.push({ id, label });
+  }
+
+  // 新規トピックは textarea（1 行 1 件）から取り込む。id は保存時に採番。
+  for (const label of lines(String(form.get("newTopics") ?? ""))) {
+    axes.push({ id: "", label });
   }
 
   return {
@@ -158,10 +162,8 @@ function renderForm(
     `<button type="submit">今すぐ日次パスを実行</button>` +
     `</form>`;
 
-  // 既存軸 + 追加用の空行を 1 つ描画する。
-  const axisFields = [...model.axes, { id: "", label: "" }]
-    .map((a, i) => renderAxis(i, a))
-    .join("");
+  // 既存軸を描画する。新規追加は下の newTopics textarea（1 行 1 件・件数無制限）。
+  const axisFields = model.axes.map((a, i) => renderAxis(i, a)).join("");
 
   const scoringRows = [
     `interest 重み: ${scoring.weights.interest}`,
@@ -184,6 +186,8 @@ function renderForm(
     `<h2>関心軸</h2>` +
     `<p class="note">トピックのラベルだけ入力してください（日本語可）。関心記述文とベクトルは次回の日次パスがラベルから自動生成します。ラベルを変えると次回パスで再生成されます。</p>` +
     axisFields +
+    `<label>トピックを追加（1 行 1 件）</label>` +
+    `<textarea name="newTopics" rows="4"></textarea>` +
     `<h2>ソース</h2>` +
     `<p class="note">購読するフィードの URL を 1 行 1 件で入力してください（RSS/Atom。ブログ / Medium 著者 / ニュースレター等）。</p>` +
     `<label>フィード URL（1 行 1 件）</label>` +

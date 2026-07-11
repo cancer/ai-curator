@@ -89,9 +89,15 @@ describe("renderSettingsForm", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain('method="post"');
-    // 空 KV では設定をコードに持たないので、フォームは空（追加用の空行のみ）で開く。
+    // 空 KV では設定をコードに持たないので、フォームは空（feeds と新規トピック欄のみ）で開く。
     expect(html).toContain('name="feeds"');
-    expect(html).toContain('name="axis-0-label"');
+    expect(html).toContain('name="newTopics"');
+  });
+
+  it("renders a multi-line textarea for adding topics in bulk", async () => {
+    const { env } = makeEnv();
+    const html = await (await renderSettingsForm(env)).text();
+    expect(html).toContain('<textarea name="newTopics"');
   });
 
   it("renders a run-now button that posts to /run", async () => {
@@ -143,19 +149,29 @@ describe("handleSettingsUpdate", () => {
     ]);
   });
 
-  it("assigns a fresh id to a new axis added from the blank add-row", async () => {
+  it("adds multiple topics at once from the newTopics textarea, each with a fresh id", async () => {
     const { env, saved } = makeEnv();
     const fields = validFields();
-    // 追加行はラベルのみ（id は入力させない。保存時に採番）。
-    fields["axis-2-label"] = "New Topic";
+    // 1 行 1 件で何件でも追加できる（id は保存時に採番）。
+    fields.newTopics = "Topic A\nTopic B\nTopic C";
     const res = await handleSettingsUpdate(env, postForm(fields));
     expect(res.status).toBe(303);
-    const added = saved().interestAxes.find((a) => a.label === "New Topic");
-    expect(added).toBeDefined();
-    expect(added!.id).toBeTruthy();
-    // 既存 id と衝突しない新規 id が採番される。
-    expect(added!.id).not.toBe("ai");
-    expect(added!.id).not.toBe("web-fw");
+    const labels = saved().interestAxes.map((a) => a.label);
+    expect(labels).toEqual(expect.arrayContaining(["Topic A", "Topic B", "Topic C"]));
+    // 全軸の id が一意に採番される。
+    const ids = saved().interestAxes.map((a) => a.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(id).toBeTruthy();
+  });
+
+  it("saves topics-only input when KV is empty (bootstrap via newTopics)", async () => {
+    const { env, saved } = makeEmptyEnv();
+    const res = await handleSettingsUpdate(
+      env,
+      postForm({ feeds: "https://a.example/rss", newTopics: "AI" }),
+    );
+    expect(res.status).toBe(303);
+    expect(saved().interestAxes.map((a) => a.label)).toEqual(["AI"]);
   });
 
   it("deletes an axis whose delete checkbox is set", async () => {
