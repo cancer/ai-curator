@@ -20,6 +20,8 @@
  * 冪等性（step 再実行 = at-least-once に耐える）:
  * - articles は INSERT ... ON CONFLICT(url) DO NOTHING。
  * - embedding は未生成(NULL)の行だけ処理。
+ * - summaries は 1 記事 1 行（article_id UNIQUE）。行が無い記事だけ要約し、
+ *   INSERT ... ON CONFLICT(article_id) DO NOTHING。feed_entries の delete→insert では消えない。
  * - feed_entries / feed_trends は当日分を delete してから insert。
  */
 
@@ -107,14 +109,16 @@ const WORKING_SET_SQL =
 const AXES_SQL = "SELECT axis_id, embedding, embedding_model FROM interest_axes";
 
 /**
- * 当日フィードの未要約エントリ（要約段の対象。title/source/url はメタで永続済み）。
- * summary IS NULL に絞るのは、step 再実行時に要約済みを飛ばして未了分だけ進めるため
- * （ingest の embedding=NULL のみ処理と同じ設計思想）。
+ * 当日掲載のうち summaries に行が無いエントリ（要約段の対象。title/source/url はメタで
+ * 永続済み）。summaries を LEFT JOIN して s.article_id IS NULL に絞るのは、step 再実行時に
+ * 要約済みを飛ばして未了分だけ進めるため（ingest の embedding=NULL のみ処理と同じ設計思想）。
+ * 要約は summaries に 1 記事 1 行で永続するので、feed_entries の delete→insert では消えない。
  */
 const ENTRIES_FOR_DATE_SQL =
   "SELECT fe.article_id AS article_id, a.title AS title, a.source AS source, " +
   "a.url AS url FROM feed_entries fe JOIN articles a ON a.id = fe.article_id " +
-  "WHERE fe.date = ? AND fe.summary IS NULL ORDER BY fe.rank";
+  "LEFT JOIN summaries s ON s.article_id = fe.article_id " +
+  "WHERE fe.date = ? AND s.article_id IS NULL ORDER BY fe.rank";
 
 /** 当日フィードの hit_axis と title（傾向段の集計元。どちらもメタ）。 */
 const TREND_SOURCE_SQL =
@@ -430,8 +434,8 @@ export interface SummarizeDeps {
 }
 
 /**
- * 当日 feed_entries を全件要約して summary を書く。body はこの step 内でリンク先から
- * 再取得して使い捨てる（前段の body はメモリに残っていない）。1 件の失敗は除外して
+ * 当日掲載のうち summaries に行が無い記事を要約して summaries へ書く。body はこの step 内で
+ * リンク先から再取得して使い捨てる（前段の body はメモリに残っていない）。1 件の失敗は除外して
  * 続行する。要約は自前生成なので保存してよい。
  *
  * 品質面のトレードオフ: feedSummary は step をまたげず常に null を渡すため、リンク先の
@@ -469,8 +473,9 @@ export async function summarizeFeed(
     feedSummary: null,
   }));
 
-  // per-entry: 要約できた 1 件ずつ即 UPDATE して部分進捗を永続化する（onSummary）。
-  // これで step 再実行時は summary IS NULL の残りだけを処理できる（前進性）。
+  // per-entry: 要約できた 1 件ずつ即 INSERT して部分進捗を永続化する（onSummary）。
+  // これで step 再実行時は summaries に行が無い残りだけを処理できる（前進性）。
+  // ON CONFLICT DO NOTHING は step の at-least-once 再実行への保険（既に行があれば書かない）。
   const { summaries, failed } = await summarizeEntries(
     ai,
     digest,
@@ -480,9 +485,10 @@ export async function summarizeFeed(
     async (articleId, summary) => {
       await db
         .prepare(
-          "UPDATE feed_entries SET summary = ? WHERE date = ? AND article_id = ?",
+          "INSERT INTO summaries (article_id, text, model) VALUES (?, ?, ?) " +
+            "ON CONFLICT(article_id) DO NOTHING",
         )
-        .bind(summary, date, articleId)
+        .bind(articleId, summary, digest.model)
         .run();
     },
   );

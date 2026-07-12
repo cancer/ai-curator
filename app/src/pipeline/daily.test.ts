@@ -387,7 +387,7 @@ interface EntryRow {
   title: string;
   source: string;
   url: string;
-  /** テスト内部の絞り込み用（ENTRIES_FOR_DATE_SQL の `summary IS NULL` を模す）。 */
+  /** テスト内部の絞り込み用（ENTRIES_FOR_DATE_SQL の `s.article_id IS NULL` を模す）。 */
   summary?: string | null;
 }
 interface TrendRow {
@@ -417,9 +417,9 @@ function makeReadDb(reads: {
             return { results: (reads.trendRows ?? []) as unknown as T[] };
           }
           if (s.includes("feed_entries fe JOIN")) {
-            // `summary IS NULL` を含むクエリ（要約段）は未要約エントリだけ返す。
+            // `s.article_id IS NULL` を含むクエリ（要約段）は未要約エントリだけ返す。
             const entries = reads.entries ?? [];
-            const rows = s.includes("summary IS NULL")
+            const rows = s.includes("s.article_id IS NULL")
               ? entries.filter((e) => e.summary == null)
               : entries;
             return { results: rows as unknown as T[] };
@@ -437,8 +437,7 @@ function makeReadDb(reads: {
           if (/^UPDATE articles SET score/i.test(s)) kind = "update-score";
           else if (/^DELETE FROM feed_entries/i.test(s)) kind = "delete-entries";
           else if (/^INSERT INTO feed_entries/i.test(s)) kind = "insert-entry";
-          else if (/^UPDATE feed_entries SET summary/i.test(s))
-            kind = "update-summary";
+          else if (/^INSERT INTO summaries/i.test(s)) kind = "insert-summary";
           else if (/^DELETE FROM feed_trends/i.test(s)) kind = "delete-trends";
           else if (/^INSERT INTO feed_trends/i.test(s)) kind = "insert-trend";
           ops.push({ kind, args: this._args });
@@ -568,8 +567,10 @@ describe("summarizeFeed", () => {
     // body was re-fetched (never carried from a prior step) for each entry.
     expect(resolveFeedBody).toHaveBeenCalledTimes(2);
     expect(resolveFeedBody).toHaveBeenCalledWith({ url: "https://x/1" });
-    const updates = ops.filter((o) => o.kind === "update-summary");
-    expect(updates).toHaveLength(2);
+    const inserts = ops.filter((o) => o.kind === "insert-summary");
+    expect(inserts).toHaveLength(2);
+    // INSERT bind order is (article_id, text, model); model comes from digest.model.
+    expect(inserts[0].args[2]).toBe(DIGEST.model);
     expect(result).toMatchObject({ summarized: 2, summaryFailed: 0 });
   });
 
@@ -605,7 +606,7 @@ describe("summarizeFeed", () => {
       sleep: noSleep,
     });
 
-    expect(ops.filter((o) => o.kind === "update-summary")).toHaveLength(1);
+    expect(ops.filter((o) => o.kind === "insert-summary")).toHaveLength(1);
     expect(result).toMatchObject({ summarized: 1, summaryFailed: 1 });
   });
 
@@ -629,9 +630,9 @@ describe("summarizeFeed", () => {
     // Only the un-summarized entry is touched (no re-work of entry 2).
     expect(resolveFeedBody).toHaveBeenCalledTimes(1);
     expect(resolveFeedBody).toHaveBeenCalledWith({ url: "https://x/1" });
-    const updates = ops.filter((o) => o.kind === "update-summary");
-    expect(updates).toHaveLength(1);
-    expect(updates[0].args[2]).toBe(1);
+    const inserts = ops.filter((o) => o.kind === "insert-summary");
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].args[0]).toBe(1);
     expect(result).toMatchObject({ summarized: 1, summaryFailed: 0 });
   });
 
@@ -655,10 +656,10 @@ describe("summarizeFeed", () => {
         bind: (...a: unknown[]) => unknown;
         run: () => Promise<unknown>;
       };
-      if (/^UPDATE feed_entries SET summary/i.test(sql.trim())) {
+      if (/^INSERT INTO summaries/i.test(sql.trim())) {
         const origBind = stmt.bind.bind(stmt);
         stmt.bind = (...a: unknown[]) => {
-          order.push(`update:${a[2]}`);
+          order.push(`update:${a[0]}`);
           return origBind(...a);
         };
       }
