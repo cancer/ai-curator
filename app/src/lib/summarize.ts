@@ -119,6 +119,10 @@ export interface SummarizeResult {
  * フィード対象エントリを要約する（全件。上位 N 件で絞らない）。各エントリで
  * 本文を resolveBody で解決し、取得できなければ feedSummary にフォールバック
  * する。1 件の要約失敗は try/catch で除外し件数を数えて、ループは止めない。
+ *
+ * onSummary を渡すと、1 件を要約できた直後に呼ぶ（永続化フック）。呼び出し側が
+ * 「要約→即保存」を per-entry で行い部分進捗を残せるようにするためで、保存の失敗は
+ * その 1 件の失敗として扱い（failed に計上）ループは続ける。
  */
 export async function summarizeEntries(
   ai: Ai,
@@ -126,6 +130,7 @@ export async function summarizeEntries(
   targets: SummaryTarget[],
   resolveBody: (target: SummaryTarget) => Promise<string | null>,
   sleep?: (ms: number) => Promise<void>,
+  onSummary?: (articleId: number, summary: string) => Promise<void>,
 ): Promise<SummarizeResult> {
   const summaries = new Map<number, string>();
   let failed = 0;
@@ -151,6 +156,9 @@ export async function summarizeEntries(
         text,
         sleep,
       );
+      if (onSummary) {
+        await onSummary(target.articleId, summary);
+      }
       summaries.set(target.articleId, summary);
     } catch (err) {
       failed += 1;
