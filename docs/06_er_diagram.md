@@ -44,7 +44,7 @@ erDiagram
 
     summaries {
         INTEGER id PK
-        INTEGER article_id FK "UNIQUE。1 記事 1 行"
+        INTEGER article_id FK "UNIQUE。1 記事 1 要約"
         TEXT text "LLM 要約"
         TEXT model "生成モデル名"
         TEXT created_at
@@ -66,7 +66,7 @@ erDiagram
     }
 
     articles ||--o{ feed_entries : "日次フィードに掲載"
-    articles ||--o| summaries : "要約を持つ（0 or 1）"
+    articles ||--o| summaries : "要約（行の存在=要約の存在）"
     articles ||--o{ feedback : "評価・クリックの対象"
     interest_axes ||--o{ articles : "hit_axis（文字列参照）"
     interest_axes ||--o{ feed_trends : "axis_id（文字列参照）"
@@ -74,8 +74,11 @@ erDiagram
 
 ## 補足
 
-- 要約は `feed_entries` ではなく `summaries` が持つ（1 記事 1 行。「要約がある」= 行が存在する）。
-  フィード項目の要約は `feed_entries.article_id` → `summaries.article_id` の結合で導出する（日付には依存しない）。
+- 要約は `summaries` に `article_id` 起点で永続する（1 記事 1 行。「要約がある」= 行が存在する。
+  nullable 列を作らない設計）。`feed_entries` は日次パス再実行で当日分を delete→insert するが、
+  要約は `feed_entries` に持たないためこの入れ替えで消えない。
+- フィード項目と要約の対応は保存しない。`feed_entries.article_id` → `summaries.article_id` の結合で
+  導出する（日付には依存しない）。
 - URL を持つのは `articles.url` のみ。`feed_entries` / `feedback` は ID 参照だけで URL を持たない。
 - `feedback` は `feed_entry_id` を API で受け取るが、保存時に `article_id` へ解決している
   （`app/src/viewer/feedback.ts`）。どの日の掲載から評価が発生したかは保存していない。
