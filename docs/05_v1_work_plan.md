@@ -140,10 +140,20 @@ CREATE TABLE feed_entries (
   date        TEXT NOT NULL,            -- YYYY-MM-DD（フィード生成日）
   article_id  INTEGER NOT NULL REFERENCES articles(id),
   rank        INTEGER NOT NULL,         -- スコア降順 1 始まり
-  summary     TEXT,                     -- LLM 要約（全件生成。本文取得失敗時のみ NULL）
+  -- summary 列は持たない（要約は summaries テーブルへ分離。2026-07-12 改定。0002）
   UNIQUE(date, article_id)
 );
 CREATE INDEX idx_feed_date_rank ON feed_entries(date, rank);
+
+-- LLM 要約（自前生成物なので保存可）。1 記事 1 行・article_id 起点で、「要約がある」= 行が存在する
+-- （nullable 列を作らない設計。feed_entries の delete→insert では消えない。2026-07-12 改定。0002）
+CREATE TABLE summaries (
+  id          INTEGER PRIMARY KEY,
+  article_id  INTEGER NOT NULL UNIQUE REFERENCES articles(id),
+  text        TEXT NOT NULL,
+  model       TEXT NOT NULL,            -- 生成モデル名
+  created_at  TEXT DEFAULT (datetime('now'))
+);
 
 CREATE TABLE feed_trends (
   id         INTEGER PRIMARY KEY,
@@ -320,7 +330,7 @@ interface NormalizedArticle {
    - 本文の取得: GitHub → release note / 汎用フィード → feed 内本文（`content:encoded`/`content`/`description`）があればそれ、無ければリンク先を粗いタグ除去（root/exclude なしの htmlToText）で本文化 / HN → リンク先を粗いタグ除去で本文化。単一パスなので前段でメモリ保持した本文/テキストがあればそれを使い、無いものだけ取得する
    - 取得失敗や本文が空/極端に短い場合はスニペット→タイトルの順でフォールバック。**失敗してもループを止めない**（1 件の失敗で全体を失わない。try/catch で件数をログ）
    - LLM 呼び出し: `env.AI.run(config.digest.model, { messages, max_tokens: 300 })`。system プロンプト: 「あなたは技術ニュースの編集者です。与えられた記事のタイトルと本文抜粋から、内容を 2〜3 文の**日本語**で要約してください。誇張や主観的評価を避け、記事の主旨を簡潔に伝えてください。」 user: `タイトル: {title}\n\n本文抜粋:\n{body の先頭 6,000 字}`
-   - 生成した要約を feed_entries.summary に保存（自前生成物なので保存可）
+   - 生成した要約を summaries テーブルに保存（自前生成物なので保存可。1 記事 1 行・article_id 起点。2026-07-12 改定）
 7. **傾向サマリ（feed_trends）**: 軸ごとに hit_count（当日記事の hit_axis 集計）を出し、軸ごとに「その軸のタイトル上位 10 件」を入力に LLM で 1〜2 文の日本語叙述を生成して narrative に保存
 - **digest LLM モデルの選定**（実装時に行う）: Workers AI のテキスト生成モデル一覧（https://developers.cloudflare.com/workers-ai/models/）から日本語対応を明記するモデルを 2〜3 候補選び、実記事 5 件で日本語要約品質を目視比較して初期値を決める。**llama-3.2-3b-instruct は日本語品質不十分のため選ばない**（前提知識 10）。モデル id は `SYSTEM_CONFIG.digest.model`（コード内固定）なので、運用前にコード編集で選定値へ差し替える（UI 非公開）
 - **テスト**: score / cosine / freshness / 意味的 Dedup / SimHash 以外に、「本文なし記事が混ざっても要約ステップが落ちない」ことをモックでテスト
