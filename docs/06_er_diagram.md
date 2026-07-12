@@ -79,6 +79,8 @@ erDiagram
   要約は `feed_entries` に持たないためこの入れ替えで消えない。
 - フィード項目と要約の対応は保存しない。`feed_entries.article_id` → `summaries.article_id` の結合で
   導出する（日付には依存しない）。
+- digest モデルを切り替えても既存の要約は再生成されない（`summaries` は `article_id` で 1 記事 1 行。
+  新モデルで作り直す場合は該当行の削除が必要）。
 - URL を持つのは `articles.url` のみ。`feed_entries` / `feedback` は ID 参照だけで URL を持たない。
 - `feedback` は `feed_entry_id` を API で受け取るが、保存時に `article_id` へ解決している
   （`app/src/viewer/feedback.ts`）。どの日の掲載から評価が発生したかは保存していない。
