@@ -19,12 +19,14 @@ const TRENDS_SQL =
   "SELECT axis_id, hit_count, narrative FROM feed_trends " +
   "WHERE date = ? ORDER BY hit_count DESC";
 
+// 要約は summaries に分離済み（1 記事 1 行）。行が無ければ summary は NULL。
 // LIMIT は PAGE_SIZE+1 件取り、余りの有無で次ページの存在を判定する。
 const ENTRIES_SQL =
-  "SELECT fe.id AS feed_entry_id, fe.rank AS rank, fe.summary AS summary, " +
+  "SELECT fe.id AS feed_entry_id, fe.rank AS rank, s.text AS summary, " +
   "a.title AS title, a.source AS source, a.published_at AS published_at, " +
   "a.url AS url, a.hit_axis AS hit_axis " +
   "FROM feed_entries fe JOIN articles a ON a.id = fe.article_id " +
+  "LEFT JOIN summaries s ON s.article_id = fe.article_id " +
   "WHERE fe.date = ? ORDER BY fe.rank LIMIT ? OFFSET ?";
 
 interface EntryRow {
