@@ -59,13 +59,13 @@ RawItem を仕様 §3 の共通スキーマに変換する。URL 正規化（ト
 
 1. **当日傾向サマリ**（§8.1）: Scorer が出したヒット軸分布・意味的 Dedup のクラスタを軸ごとに集計し、LLM で軸別に叙述する。集計は既存のスコアリング成果物を再利用するため追加の Embedding は不要
 2. **ランク付き記事リスト**（§8.2）: 当日母集団をスコア降順で全件保持。hard cut しない
-3. **全件要約**: フィードに載る全記事の本文を取得（汎用フィード=`content:encoded`/`content`/`description`、無ければリンク先を粗抽出 / GitHub=release note / HN=リンク先を粗抽出）して LLM 要約を生成し、feed_entries.summary に保存する。取得失敗はスニペット→タイトルにフォールバックし、1 件の失敗で全体を止めない。本文は要約後に破棄する
+3. **全件要約**: フィードに載る全記事の本文を取得（汎用フィード=`content:encoded`/`content`/`description`、無ければリンク先を粗抽出 / GitHub=release note / HN=リンク先を粗抽出）して LLM 要約を生成し、summaries テーブル（1 記事 1 行）に保存する。取得失敗はスニペット→タイトルにフォールバックし、1 件の失敗で全体を止めない。本文は要約後に破棄する
 
 LLM は Workers AI を使用（確定 2026-07-06）。PoC 実測（`docs/poc_results.md` ④）で llama-3.2-3b の日本語品質が不十分と判明したため、実運用前に日本語品質の高い生成モデルへ再選定する。**LLM 要約は全件生成に確定**（2026-07-09。コストが制約でないため体験優先）。
 
 ### 2.6 Viewer
 
-ランク付きフィードを表示する非公開ページ（fetch ハンドラ）。Cloudflare Access で認証 (BS L78)。スコア順に並べ「もっと見る」で下位をページング読み込みする。要約は日次パスで全件生成済み（feed_entries.summary）なので、Viewer は保存済み要約を表示するだけ（本文再 fetch はしない）。配信フォーマット細部は未確定 (BS L115)。
+ランク付きフィードを表示する非公開ページ（fetch ハンドラ）。Cloudflare Access で認証 (BS L78)。スコア順に並べ「もっと見る」で下位をページング読み込みする。要約は日次パスで全件生成済み（summaries テーブル）なので、Viewer は保存済み要約を表示するだけ（本文再 fetch はしない）。配信フォーマット細部は未確定 (BS L115)。
 
 ## 3. データ設計【たたき台】
 
@@ -103,8 +103,16 @@ CREATE TABLE feed_entries (
   date        TEXT NOT NULL,            -- フィード生成日
   article_id  INTEGER NOT NULL REFERENCES articles(id),
   rank        INTEGER NOT NULL,         -- スコア降順の順位（もっと見る式ページングの並び）
-  summary     TEXT,                     -- 自前生成の要約（保存可 BS L75）。全件生成（2026-07-09 確定）。取得失敗時のみ NULL
   UNIQUE(date, article_id)
+);
+
+-- 自前生成の要約（保存可 BS L75）。1 記事 1 行で、「要約がある」= 行が存在する（0002 で feed_entries から分離）
+CREATE TABLE summaries (
+  id          INTEGER PRIMARY KEY,
+  article_id  INTEGER NOT NULL UNIQUE REFERENCES articles(id),
+  text        TEXT NOT NULL,
+  model       TEXT NOT NULL,            -- 生成モデル名
+  created_at  TEXT DEFAULT (datetime('now'))
 );
 
 -- 当日傾向サマリ（軸ごと。自前生成物のみ）
