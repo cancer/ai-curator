@@ -104,8 +104,14 @@ export const SYSTEM_CONFIG: SystemConfig = {
     maxInputChars: 20000,
   },
   digest: {
-    model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-    maxOutputTokens: 300,
+    // Gemma 4 は built-in thinking の推論モデル。要約品質（帰属・原語保持）は
+    // 高いが、同期 AI.run では推論生成が ~60s ゲートウェイに達し 504 になるため
+    // summarize.ts はストリーミング必須で呼ぶ。返却は choices 形式・推論は破棄する。
+    model: "@cf/google/gemma-4-26b-a4b-it",
+    // 推論トークン＋回答トークンの合計上限（トークン単位）。推論モデルは生成量が
+    // run 間で大きくぶれるため、実測（回答到達時 ~5k tok）に安全余裕を足した値。
+    // ストリーミングなので stop で止まった分しか課金されない（上限は最悪コスト）。
+    maxOutputTokens: 10000,
   },
 };
 

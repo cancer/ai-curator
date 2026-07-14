@@ -7,6 +7,7 @@ import {
   type Fetchers,
   type IngestDeps,
 } from "./daily";
+import { sseStream } from "../../test/sse";
 import type {
   DigestConfig,
   EmbeddingConfig,
@@ -559,7 +560,7 @@ describe("summarizeFeed", () => {
     const { db, ops } = makeReadDb({ entries });
     const resolveFeedBody = vi.fn(async () => "re-fetched body");
 
-    const result = await summarizeFeed(db, ai(vi.fn(async () => ({ response: "要約" }))), DIGEST, "2026-07-08", {
+    const result = await summarizeFeed(db, ai(vi.fn(async () => sseStream("要約"))), DIGEST, "2026-07-08", {
       bodyFetchers: { resolveFeedBody },
       sleep: noSleep,
     });
@@ -577,7 +578,7 @@ describe("summarizeFeed", () => {
   it("does not persist the re-fetched body (only the generated summary)", async () => {
     const { db, ops } = makeReadDb({ entries: [entries[0]] });
 
-    await summarizeFeed(db, ai(vi.fn(async () => ({ response: "要約" }))), DIGEST, "2026-07-08", {
+    await summarizeFeed(db, ai(vi.fn(async () => sseStream("要約"))), DIGEST, "2026-07-08", {
       bodyFetchers: { resolveFeedBody: async () => "SENTINEL_BODY" },
       sleep: noSleep,
     });
@@ -594,7 +595,7 @@ describe("summarizeFeed", () => {
         if (input.messages[1].content.includes("FAIL")) {
           throw new Error("LLM failed");
         }
-        return { response: "生成テキスト" };
+        return sseStream("生成テキスト");
       },
     );
 
@@ -621,7 +622,7 @@ describe("summarizeFeed", () => {
 
     const result = await summarizeFeed(
       db,
-      ai(vi.fn(async () => ({ response: "要約" }))),
+      ai(vi.fn(async () => sseStream("要約"))),
       DIGEST,
       "2026-07-08",
       { bodyFetchers: { resolveFeedBody }, sleep: noSleep },
@@ -668,7 +669,7 @@ describe("summarizeFeed", () => {
 
     await summarizeFeed(
       db,
-      ai(vi.fn(async () => ({ response: "要約" }))),
+      ai(vi.fn(async () => sseStream("要約"))),
       DIGEST,
       "2026-07-08",
       { bodyFetchers: { resolveFeedBody }, sleep: noSleep },
@@ -700,7 +701,7 @@ describe("buildTrends", () => {
 
     const result = await buildTrends(
       db,
-      ai(vi.fn(async () => ({ response: "傾向" }))),
+      ai(vi.fn(async () => sseStream("傾向"))),
       DIGEST,
       axesConfig,
       "2026-07-08",

@@ -33,7 +33,15 @@ function createMockEnv(): Env {
 }
 
 describe("config", () => {
-  describe("loadConfig", () => {
+  it("reserves enough output tokens for the detailed four-part article summary", () => {
+    expect(SYSTEM_CONFIG.digest.maxOutputTokens).toBe(10000);
+  });
+
+  it("uses the Gemma reasoning model selected for digest summaries", () => {
+    expect(SYSTEM_CONFIG.digest.model).toBe("@cf/google/gemma-4-26b-a4b-it");
+  });
+
+describe("loadConfig", () => {
     it("merges the KV UserConfig with SYSTEM_CONFIG into a full Config", async () => {
       const env = createMockEnv();
       vi.mocked(env.CONFIG.get as any).mockResolvedValue(
