@@ -46,6 +46,7 @@ import {
   summarizeEntries,
   summarizeTrend,
   type SummaryTarget,
+  type DigestMetric,
 } from "../lib/summarize";
 import { fetchFeed, resolveFeedBody } from "../adapters/feed";
 
@@ -119,6 +120,44 @@ const ENTRIES_FOR_DATE_SQL =
   "a.url AS url FROM feed_entries fe JOIN articles a ON a.id = fe.article_id " +
   "LEFT JOIN summaries s ON s.article_id = fe.article_id " +
   "WHERE fe.date = ? AND s.article_id IS NULL ORDER BY fe.rank";
+
+/** digest 生成メトリクスの記録（観測用。1 試行 1 行）。 */
+const INSERT_DIGEST_METRIC_SQL =
+  "INSERT INTO digest_metrics " +
+  "(label, model, attempt, ms, finish_reason, completion_tokens, max_tokens, content_len, empty, error) " +
+  "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+/**
+ * digest メトリクスを D1 へ保存する。観測は生成本体を壊さないため、書き込み失敗は
+ * warn に留めて握り潰す（summarize 側の recordMetric も onMetric 例外を捕捉するが、
+ * ここでも二重に保険する）。
+ */
+async function recordDigestMetric(
+  db: D1Database,
+  m: DigestMetric,
+): Promise<void> {
+  try {
+    await db
+      .prepare(INSERT_DIGEST_METRIC_SQL)
+      .bind(
+        m.label,
+        m.model,
+        m.attempt,
+        m.ms,
+        m.finishReason,
+        m.completionTokens,
+        m.maxTokens,
+        m.contentLen,
+        m.empty ? 1 : 0,
+        m.error,
+      )
+      .run();
+  } catch (err) {
+    console.warn(
+      `digest metric persist failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
 
 /** 当日フィードの hit_axis と title（傾向段の集計元。どちらもメタ）。 */
 const TREND_SOURCE_SQL =
@@ -491,6 +530,7 @@ export async function summarizeFeed(
         .bind(articleId, summary, digest.model)
         .run();
     },
+    (metric) => recordDigestMetric(db, metric),
   );
 
   return { summarized: summaries.size, summaryFailed: failed };

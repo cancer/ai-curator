@@ -129,6 +129,21 @@ describe("resolveFeedBody", () => {
     expect(body).toContain("Fetched text.");
   });
 
+  it("prefers the main element when extracting a fetched article", async () => {
+    const body = await resolveFeedBody(
+      { url: "https://x/a" },
+      {
+        fetch: async () =>
+          new Response(
+            "<html><body><nav>Site menu</nav><main><p>Article body.</p></main><footer>Copyright</footer></body></html>",
+            { status: 200 },
+          ),
+        sleep: async () => {},
+      },
+    );
+    expect(body).toBe("Article body.");
+  });
+
   it("returns null when the link fetch fails", async () => {
     const body = await resolveFeedBody(
       { url: "https://x/a" },

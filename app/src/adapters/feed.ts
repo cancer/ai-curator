@@ -220,6 +220,11 @@ export async function resolveFeedBody(
   if (!res.ok) {
     return null;
   }
-  const body = await htmlToText(await res.text());
+  const html = await res.text();
+  // 多くの記事ページでは main が本文を囲む。まず main だけを抽出して
+  // ナビゲーションやフッターで要約用の文字数枠を浪費しないようにする。
+  // main を持たないページでは従来どおりページ全体へフォールバックする。
+  const main = await htmlToText(html, { root: "main" });
+  const body = main === "" ? await htmlToText(html) : main;
   return body === "" ? null : body;
 }
