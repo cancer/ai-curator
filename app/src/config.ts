@@ -104,14 +104,15 @@ export const SYSTEM_CONFIG: SystemConfig = {
     maxInputChars: 20000,
   },
   digest: {
-    // Gemma 4 は built-in thinking の推論モデル。要約品質（帰属・原語保持）は
-    // 高いが、同期 AI.run では推論生成が ~60s ゲートウェイに達し 504 になるため
-    // summarize.ts はストリーミング必須で呼ぶ。返却は choices 形式・推論は破棄する。
-    model: "@cf/google/gemma-4-26b-a4b-it",
-    // 推論トークン＋回答トークンの合計上限（トークン単位）。推論モデルは生成量が
-    // run 間で大きくぶれるため、実測（回答到達時 ~5k tok）に安全余裕を足した値。
-    // ストリーミングなので stop で止まった分しか課金されない（上限は最悪コスト）。
-    maxOutputTokens: 10000,
+    // Qwen3 30B A3B（推論モデル）。同じく検討した Gemma 4 / GLM‑4.7 / GPT‑OSS は
+    // built-in thinking を止める手段が Workers AI に無く、推論だけで max_tokens を
+    // 食い潰し可視回答が空になる「暴走」を起こす（Gemma は本番で約 50%）。Qwen3 は
+    // 検証・本番で必ず stop・非空に収束する唯一の候補のため採用。
+    model: "@cf/qwen/qwen3-30b-a3b-fp8",
+    // 推論トークン＋回答トークンの合計上限。Qwen3 の実測完走は ~1,000〜1,100 tok で、
+    // 4,000 は十分な余裕。Qwen3 は自発的に stop するため、上限は最悪ケースの天井
+    // （＝暴走時のコスト上限）として置くだけで、通常は実消費分しか課金されない。
+    maxOutputTokens: 4000,
   },
 };
 

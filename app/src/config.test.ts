@@ -34,11 +34,11 @@ function createMockEnv(): Env {
 
 describe("config", () => {
   it("reserves enough output tokens for the detailed four-part article summary", () => {
-    expect(SYSTEM_CONFIG.digest.maxOutputTokens).toBe(10000);
+    expect(SYSTEM_CONFIG.digest.maxOutputTokens).toBe(4000);
   });
 
-  it("uses the Gemma reasoning model selected for digest summaries", () => {
-    expect(SYSTEM_CONFIG.digest.model).toBe("@cf/google/gemma-4-26b-a4b-it");
+  it("uses the Qwen3 reasoning model selected for digest summaries", () => {
+    expect(SYSTEM_CONFIG.digest.model).toBe("@cf/qwen/qwen3-30b-a3b-fp8");
   });
 
 describe("loadConfig", () => {

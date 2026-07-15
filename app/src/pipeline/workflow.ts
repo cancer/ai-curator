@@ -43,6 +43,16 @@ const STEP_CONFIG: WorkflowStepConfig = {
 };
 
 /**
+ * 要約 step は全記事を逐次生成するため、記事件数が多い日は 10 分枠に収まらない
+ * ことがある（過去に summarize が枠超過→リトライ枯渇で throw し、後続の trends
+ * step ごと落ちた）。要約だけ長めの timeout にして、後続ステップを巻き添えにしない。
+ */
+const SUMMARIZE_STEP_CONFIG: WorkflowStepConfig = {
+  ...STEP_CONFIG,
+  timeout: "30 minutes",
+};
+
+/**
  * 日次パスのオーケストレーション本体。DailyPass.run から env/event/step を渡して呼ぶ。
  * WorkflowEntrypoint はテストで直接 new できない（ctx の実体が要る）ため、ロジックは
  * この純関数に置き、クラスは薄い委譲だけにする。
@@ -107,7 +117,7 @@ export async function runDailyWorkflow(
   );
 
   // summarize: 当日 feed_entries を全件要約（body はここで再取得して使い捨て）。
-  await step.do("summarize", STEP_CONFIG, async () =>
+  await step.do("summarize", SUMMARIZE_STEP_CONFIG, async () =>
     summarizeFeed(env.DB, env.AI, config.digest, date),
   );
 

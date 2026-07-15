@@ -19,9 +19,10 @@ npm run typecheck # tsc --noEmit
 
 ## 運用: digest 生成ログの調査（`digest_metrics`）
 
-digest モデルは推論モデル（Gemma 4）で、生成量が run ごとに大きくぶれる。推論だけで
-`max_tokens` に達し可視回答が空になる「暴走」が非決定的に起きるため、要約 1 試行ごとの
-メトリクスを D1 テーブル `digest_metrics` に記録している（リトライ各回・失敗も 1 行ずつ）。
+digest モデルは推論モデル。生成量が run ごとにぶれ、モデルによっては推論だけで
+`max_tokens` に達し可視回答が空になる「暴走」が起きうる（Gemma 4 は本番で約 50%
+暴走したため Qwen3 へ切替。Qwen3 は暴走せず stop・非空に収束する）。この監視のため、
+要約 1 試行ごとのメトリクスを D1 テーブル `digest_metrics` に記録している（リトライ各回・失敗も 1 行ずつ）。
 `max_tokens`（`app/src/config.ts` の `SYSTEM_CONFIG.digest.maxOutputTokens`）の適値は、
 このログを実運用で溜めてから判断する。
 
