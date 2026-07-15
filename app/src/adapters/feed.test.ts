@@ -153,16 +153,31 @@ describe("resolveArticleBody", () => {
     expect(body).toBe("INLINE");
   });
 
-  it("falls back to feedSummary when no inline body", async () => {
+  it("does not short-circuit on feedSummary; proceeds to fetch the real body", async () => {
+    // feedSummary スニペットは実本文ではないので解決チェーンに入れない。
     const body = await resolveArticleBody(
       { url: "https://x/a", feedSummary: "snippet" },
       {
-        fetch: async () => {
-          throw new Error("should not fetch");
-        },
+        fetch: async () =>
+          new Response(
+            "<html><body><main><p>Real fetched body.</p></main></body></html>",
+            { status: 200 },
+          ),
+        sleep: async () => {},
       },
     );
-    expect(body).toBe("snippet");
+    expect(body).toBe("Real fetched body.");
+  });
+
+  it("returns null when the real body cannot be resolved, even if feedSummary exists", async () => {
+    const body = await resolveArticleBody(
+      { url: "https://x/a", feedSummary: "snippet" },
+      {
+        fetch: async () => new Response("nope", { status: 500 }),
+        sleep: async () => {},
+      },
+    );
+    expect(body).toBeNull();
   });
 
   it("fetches and crudely extracts the link when neither body nor feedSummary", async () => {
@@ -277,6 +292,22 @@ describe("resolveArticleBody: Medium feed recovery", () => {
   it("recovers the full body of a Medium article via its derived feed", async () => {
     const body = await resolveArticleBody(
       { url: "https://medium.com/@alice/post-one-abc" },
+      {
+        fetch: async () => new Response(MEDIUM_FEED, { status: 200 }),
+        sleep: async () => {},
+      },
+    );
+    expect(body).toBe("Full body of post one about widgets.");
+  });
+
+  it("recovers the Medium body even when a feedSummary snippet is present", async () => {
+    // description のみの Medium 記事でも、実本文（content:encoded）を回収し
+    // スニペットに短絡させない。
+    const body = await resolveArticleBody(
+      {
+        url: "https://medium.com/@alice/post-one-abc",
+        feedSummary: "Snippet one.",
+      },
       {
         fetch: async () => new Response(MEDIUM_FEED, { status: 200 }),
         sleep: async () => {},

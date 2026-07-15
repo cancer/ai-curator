@@ -324,14 +324,18 @@ async function fetchMediumFeed(
 }
 
 /**
- * 要約・埋め込み用の本文を解決する。優先順:
+ * 「実本文」を解決する。返すのは実本文か null のみ（feedSummary スニペットは返さない）。
+ * 優先順:
  *  1. インライン全文（parseFeed が body に入れた content:encoded / content）
- *  2. feedSummary（description/summary スニペット）
- *  3. Medium フィード導出 → `content:encoded` 全文（HTML ページを叩かない）
- *  4. 記事 URL を通常取得 → 抽出カスケード（main→article→全体）
- *  5. いずれも取れなければ null
+ *  2. Medium フィード導出 → `content:encoded` 全文（HTML ページを叩かない）
+ *  3. 記事 URL を通常取得 → 抽出カスケード（main→article→全体）
+ *  4. いずれも取れなければ null
  *
- * ネットワークへ出るのは 3・4 のみ。1・2 に当たれば fetch しない。`mediumFeedCache` は
+ * feedSummary（~100 字スニペット）は本文ではないので解決チェーンに入れない。スニペットへの
+ * フォールバックは呼び出し側の責務（embedding は本文長で本文/スニペットを選び、summarize は
+ * 本文 or スニペットに閾値を課す）。これは「ランキングも要約も本文由来」という core value に従う。
+ *
+ * ネットワークへ出るのは 2・3 のみ。1 に当たれば fetch しない。`mediumFeedCache` は
  * 呼び出し側が 1 step 内で 1 個生成し全記事で共有する（フィードをソース単位でキャッシュ）。
  * 渡されなければ関数内でローカル生成する（＝キャッシュは 1 記事内に閉じる）。
  */
@@ -343,9 +347,6 @@ export async function resolveArticleBody(
 ): Promise<string | null> {
   if (article.body !== undefined && article.body !== "") {
     return article.body;
-  }
-  if (article.feedSummary !== undefined && article.feedSummary !== "") {
-    return article.feedSummary;
   }
 
   const mediumBody = await resolveMediumFeedBody(article.url, options);
