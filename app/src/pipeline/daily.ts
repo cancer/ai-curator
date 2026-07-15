@@ -48,7 +48,7 @@ import {
   type SummaryTarget,
   type DigestMetric,
 } from "../lib/summarize";
-import { fetchFeed, resolveFeedBody } from "../adapters/feed";
+import { fetchFeed, resolveArticleBody, MIN_BODY_CHARS } from "../adapters/feed";
 
 /** embedding 呼び出しの間隔（レート制御）。 */
 const EMBED_SPACING_MS = 150;
@@ -69,14 +69,15 @@ const defaultFetchers: Fetchers = {
 /**
  * 要約段で本文を解決する関数群（テストで差し替え可能）。
  * body は step をまたげないため、要約段では常にリンク先を再取得する
- * （resolveFeedBody に body/feedSummary を渡さない → 記事 URL の粗抽出に落ちる）。
+ * （resolveArticleBody に url だけ渡す → インライン body/feedSummary は無く、Medium
+ *   フィード導出 → 記事 URL の抽出カスケードに落ちる）。
  */
 export interface BodyFetchers {
-  resolveFeedBody(article: { url: string }): Promise<string | null>;
+  resolveArticleBody(article: { url: string }): Promise<string | null>;
 }
 
 const defaultBodyFetchers: BodyFetchers = {
-  resolveFeedBody: (article) => resolveFeedBody(article),
+  resolveArticleBody: (article) => resolveArticleBody(article),
 };
 
 /** 各種待機（既定 setTimeout）。テストで no-op に差し替える。 */
@@ -212,14 +213,17 @@ export interface IngestDeps {
   fetchers?: Fetchers;
   embed?: typeof embed;
   sleep?: Sleep;
+  /** 本文解決（テストで差し替え可能）。既定は adapters/feed の resolveArticleBody。 */
+  resolveArticleBody?: typeof resolveArticleBody;
 }
 
 /**
  * 1 フィードの取得〜メタ INSERT〜embedding までを 1 step 内で行う。
  *
- * feedSummary はこの step 内メモリでだけ使い（SimHash 入力・embedding 入力）、
- * D1・戻り値には載せない。cross-feed の重複判定は D1 の直近ハッシュを都度ロード
- * することで成立する（先行フィードの INSERT が content_hash を永続済み）。
+ * feedSummary/body はこの step 内メモリでだけ使う（feedSummary=SimHash 入力、
+ * body=embedding 入力／本文が MIN_BODY_CHARS 未満のときだけ feedSummary へフォールバック）。
+ * どちらも D1・戻り値・ログには載せない。cross-feed の重複判定は D1 の直近ハッシュを都度
+ * ロードすることで成立する（先行フィードの INSERT が content_hash を永続済み）。
  *
  * 冪等性（step 再実行 = at-least-once）: INSERT は ON CONFLICT DO NOTHING、embedding は
  * NULL 行だけ処理するので二重書きにならない。加えて、INSERT 後・embedding 前に中断して
@@ -239,8 +243,11 @@ export async function ingestFeed(
   const fetchers = deps.fetchers ?? defaultFetchers;
   const runEmbed = deps.embed ?? embed;
   const sleep = deps.sleep ?? defaultSleep;
+  const resolveBody = deps.resolveArticleBody ?? resolveArticleBody;
 
   const fetched = await fetchers.fetchFeed(feedUrl, windowStart);
+  // url → 取得記事。embedding 段で本文解決の入力（インライン body/feedSummary）に使う。
+  const articleByUrl = new Map(fetched.map((article) => [article.url, article]));
 
   // SimHash Dedup → メタのみ INSERT（feed_summary は入れない）。
   const recent = await db
@@ -300,6 +307,9 @@ export async function ingestFeed(
         ).results ?? []);
 
   const pending = rows.filter((r) => r.embedding === null);
+  // Medium フィードはソース単位でキャッシュする（同一著者/publication は 1 回だけ取得）。
+  // ループ外で 1 個生成し、この記事群で共有する。
+  const mediumFeedCache = new Map<string, NormalizedArticle[]>();
   let embedded = 0;
   let embedFailed = 0;
   for (let i = 0; i < pending.length; i++) {
@@ -308,11 +318,32 @@ export async function ingestFeed(
     }
     const r = pending[i];
     const feedSummary = feedSummaryByUrl.get(r.url) ?? null;
+
+    // 本文を解決して embedding 入力を決める。本文は step 内メモリのみで、D1・戻り値・ログには
+    // 載せない。本文が MIN_BODY_CHARS 以上なら本文で、未満/null なら従来どおり
+    // title + feedSummary（スニペット）で埋め込む。body 解決の失敗（fetch 失敗・throw）は
+    // embedding を止めず、スニペットへフォールバックする（embedding 自体を失敗させない）。
+    const article = articleByUrl.get(r.url);
+    let body: string | null = null;
+    if (article !== undefined) {
+      try {
+        body = await resolveBody(article, { mediumFeedCache });
+      } catch (err) {
+        console.warn(
+          `daily: body resolution failed for article ${r.id}; ` +
+            `falling back to snippet: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    const input =
+      body !== null && body.length >= MIN_BODY_CHARS
+        ? body
+        : embeddingInput(r.title, feedSummary);
     try {
       const result = await runEmbed(
         ai,
         embedding.model,
-        embeddingInput(r.title, feedSummary),
+        input,
         embedding.maxInputChars,
       );
       await db
@@ -477,9 +508,10 @@ export interface SummarizeDeps {
  * リンク先から再取得して使い捨てる（前段の body はメモリに残っていない）。1 件の失敗は除外して
  * 続行する。要約は自前生成なので保存してよい。
  *
- * 品質面のトレードオフ: feedSummary は step をまたげず常に null を渡すため、リンク先の
- * 再取得に失敗した記事は（旧・単一パスにあった feedSummary フォールバックが効かず）
- * タイトルのみから要約される。原文非永続 + step 分割の制約に伴う既知の劣化。
+ * 劣化止め: 再取得した本文が MIN_BODY_CHARS 未満（取得失敗＝空を含む）の記事は要約を作らない
+ * （summarizeEntries が閾値でスキップし、summaries 行を作らない → ビューアは要約なしで描画する）。
+ * feedSummary は step をまたげず常に null なので、本文を回収できない記事はスニペットからの
+ * 退化要約を出す代わりに黙ってスキップされる。
  */
 export async function summarizeFeed(
   db: D1Database,
@@ -519,7 +551,8 @@ export async function summarizeFeed(
     ai,
     digest,
     targets,
-    (target) => bodyFetchers.resolveFeedBody({ url: target.url }),
+    (target) => bodyFetchers.resolveArticleBody({ url: target.url }),
+    MIN_BODY_CHARS,
     deps.sleep,
     async (articleId, summary) => {
       await db

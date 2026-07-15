@@ -179,7 +179,8 @@ describe("ingestFeed", () => {
       FEED_URL,
       new Date("2026-07-08T00:00:00.000Z"),
       EMBEDDING,
-      { fetchers, embed, sleep: noSleep },
+      // snippet-only articles (no real body) → body resolution finds nothing.
+      { fetchers, embed, sleep: noSleep, resolveArticleBody: async () => null },
     );
 
     const inserts = ops.filter((o) => o.kind === "insert-article");
@@ -285,7 +286,12 @@ describe("ingestFeed", () => {
       FEED_URL,
       new Date("2026-07-08T00:00:00.000Z"),
       EMBEDDING,
-      { fetchers: feedFetchers([article]), embed, sleep: noSleep },
+      {
+        fetchers: feedFetchers([article]),
+        embed,
+        sleep: noSleep,
+        resolveArticleBody: async () => null,
+      },
     );
 
     expect(embed).toHaveBeenCalledTimes(1);
@@ -340,7 +346,7 @@ describe("ingestFeed", () => {
       FEED_URL,
       new Date("2026-07-08T00:00:00.000Z"),
       EMBEDDING,
-      { fetchers, embed, sleep: noSleep },
+      { fetchers, embed, sleep: noSleep, resolveArticleBody: async () => null },
     );
 
     expect(ops.filter((o) => o.kind === "update-embedding")).toHaveLength(1);
@@ -365,6 +371,180 @@ describe("ingestFeed", () => {
         { fetchers, embed: embedReturning([]), sleep: noSleep },
       ),
     ).rejects.toThrow("feed down");
+  });
+
+  /** 埋め込み入力（text）を記録する embed モック（1 記事 1 呼び出し）。 */
+  function embedCapturing(texts: string[]): IngestDeps["embed"] {
+    return vi.fn(async (_ai: unknown, _model: string, text: string) => {
+      texts.push(text);
+      return { vector: [1, 0, 0] };
+    }) as IngestDeps["embed"];
+  }
+
+  it("embeds the resolved inline body when it meets the minimum length", async () => {
+    const { db } = makeIngestDb();
+    const body = "本文".repeat(300); // 600 chars ≥ MIN_BODY_CHARS
+    const texts: string[] = [];
+
+    await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      {
+        fetchers: feedFetchers([
+          normalized({ url: "u1", title: "T", feedSummary: "短い要約", body }),
+        ]),
+        embed: embedCapturing(texts),
+        sleep: noSleep,
+      },
+    );
+
+    // The full-text body drives the embedding input (not title + feedSummary).
+    expect(texts).toEqual([body]);
+  });
+
+  it("falls back to title+feedSummary for embedding when there is no body", async () => {
+    const { db } = makeIngestDb();
+    const texts: string[] = [];
+
+    await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      {
+        fetchers: feedFetchers([
+          normalized({ url: "u1", title: "T", feedSummary: "snippet" }),
+        ]),
+        embed: embedCapturing(texts),
+        sleep: noSleep,
+        // No real body for a snippet-only article → embedding uses title + feedSummary.
+        resolveArticleBody: async () => null,
+      },
+    );
+
+    expect(texts).toEqual(["T\nsnippet"]);
+  });
+
+  it("falls back to the snippet when the resolved body is below the minimum length", async () => {
+    const { db } = makeIngestDb();
+    const texts: string[] = [];
+
+    await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      {
+        fetchers: feedFetchers([
+          normalized({
+            url: "u1",
+            title: "T",
+            feedSummary: "snip",
+            body: "tiny body",
+          }),
+        ]),
+        embed: embedCapturing(texts),
+        sleep: noSleep,
+      },
+    );
+
+    expect(texts).toEqual(["T\nsnip"]);
+  });
+
+  it("keeps embedding with the snippet when body resolution throws", async () => {
+    const { db } = makeIngestDb();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const texts: string[] = [];
+    const resolveArticleBody = vi.fn(async () => {
+      throw new Error("body fetch failed");
+    }) as IngestDeps["resolveArticleBody"];
+
+    const result = await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      {
+        fetchers: feedFetchers([
+          normalized({ url: "u1", title: "T", feedSummary: "snip" }),
+        ]),
+        embed: embedCapturing(texts),
+        sleep: noSleep,
+        resolveArticleBody,
+      },
+    );
+
+    expect(texts).toEqual(["T\nsnip"]);
+    expect(result).toMatchObject({ embedded: 1, embedFailed: 0 });
+  });
+
+  it("uses a resolved long body for embedding but never persists it", async () => {
+    const { db, ops } = makeIngestDb();
+    const body = "SENTINEL_BODY ".repeat(50); // ≥ MIN_BODY_CHARS, carries the sentinel
+    const texts: string[] = [];
+
+    await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      {
+        fetchers: feedFetchers([
+          normalized({ url: "u1", title: "T", feedSummary: "snip", body }),
+        ]),
+        embed: embedCapturing(texts),
+        sleep: noSleep,
+      },
+    );
+
+    // The body drove the embedding input...
+    expect(texts[0]).toContain("SENTINEL_BODY");
+    // ...but it is never written to D1 (only the vector + model are).
+    expect(JSON.stringify(ops.map((o) => o.args))).not.toContain(
+      "SENTINEL_BODY",
+    );
+  });
+
+  it("shares one Medium feed cache across all articles in the feed", async () => {
+    const { db } = makeIngestDb();
+    const caches: unknown[] = [];
+    const resolveArticleBody = vi.fn(
+      async (_article: unknown, opts?: { mediumFeedCache?: unknown }) => {
+        caches.push(opts?.mediumFeedCache);
+        return null;
+      },
+    ) as IngestDeps["resolveArticleBody"];
+
+    await ingestFeed(
+      db,
+      ai(vi.fn()),
+      FEED_URL,
+      new Date("2026-07-08T00:00:00.000Z"),
+      EMBEDDING,
+      {
+        fetchers: feedFetchers([
+          normalized({ url: "u1", title: "T1", feedSummary: "s1" }),
+          normalized({ url: "u2", title: "T2", feedSummary: "s2" }),
+        ]),
+        embed: embedReturning([
+          [1, 0, 0],
+          [0, 1, 0],
+        ]),
+        sleep: noSleep,
+        resolveArticleBody,
+      },
+    );
+
+    expect(caches).toHaveLength(2);
+    expect(caches[0]).toBeInstanceOf(Map);
+    expect(caches[0]).toBe(caches[1]); // one instance shared across the loop
   });
 });
 
@@ -556,18 +736,21 @@ describe("summarizeFeed", () => {
     { article_id: 2, title: "t2", source: FEED_SRC, url: "https://x/2" },
   ];
 
+  // 実本文の長さ（≥ MIN_BODY_CHARS）。閾値未満だと task G の劣化止めでスキップされる。
+  const LONG_BODY = "本文".repeat(300); // 600 chars
+
   it("re-fetches body per entry and writes generated summaries", async () => {
     const { db, ops } = makeReadDb({ entries });
-    const resolveFeedBody = vi.fn(async () => "re-fetched body");
+    const resolveArticleBody = vi.fn(async () => LONG_BODY);
 
     const result = await summarizeFeed(db, ai(vi.fn(async () => sseStream("要約"))), DIGEST, "2026-07-08", {
-      bodyFetchers: { resolveFeedBody },
+      bodyFetchers: { resolveArticleBody },
       sleep: noSleep,
     });
 
     // body was re-fetched (never carried from a prior step) for each entry.
-    expect(resolveFeedBody).toHaveBeenCalledTimes(2);
-    expect(resolveFeedBody).toHaveBeenCalledWith({ url: "https://x/1" });
+    expect(resolveArticleBody).toHaveBeenCalledTimes(2);
+    expect(resolveArticleBody).toHaveBeenCalledWith({ url: "https://x/1" });
     const inserts = ops.filter((o) => o.kind === "insert-summary");
     expect(inserts).toHaveLength(2);
     // INSERT bind order is (article_id, text, model); model comes from digest.model.
@@ -577,9 +760,10 @@ describe("summarizeFeed", () => {
 
   it("does not persist the re-fetched body (only the generated summary)", async () => {
     const { db, ops } = makeReadDb({ entries: [entries[0]] });
+    const body = "SENTINEL_BODY ".repeat(50); // ≥ MIN_BODY_CHARS, carries the sentinel
 
     await summarizeFeed(db, ai(vi.fn(async () => sseStream("要約"))), DIGEST, "2026-07-08", {
-      bodyFetchers: { resolveFeedBody: async () => "SENTINEL_BODY" },
+      bodyFetchers: { resolveArticleBody: async () => body },
       sleep: noSleep,
     });
 
@@ -601,14 +785,29 @@ describe("summarizeFeed", () => {
 
     const result = await summarizeFeed(db, ai(run), DIGEST, "2026-07-08", {
       bodyFetchers: {
-        resolveFeedBody: async ({ url }) =>
-          url.endsWith("/1") ? "FAIL body" : "ok body",
+        resolveArticleBody: async ({ url }) =>
+          url.endsWith("/1") ? `FAIL ${LONG_BODY}` : `ok ${LONG_BODY}`,
       },
       sleep: noSleep,
     });
 
     expect(ops.filter((o) => o.kind === "insert-summary")).toHaveLength(1);
     expect(result).toMatchObject({ summarized: 1, summaryFailed: 1 });
+  });
+
+  it("does not emit a summary when the body is below the minimum length (degradation stop)", async () => {
+    const { db, ops } = makeReadDb({ entries: [entries[0]] });
+    const run = vi.fn(async () => sseStream("要約"));
+
+    const result = await summarizeFeed(db, ai(run), DIGEST, "2026-07-08", {
+      bodyFetchers: { resolveArticleBody: async () => "tiny snippet" },
+      sleep: noSleep,
+    });
+
+    // Below MIN_BODY_CHARS → no LLM call, no summaries row (viewer renders no summary).
+    expect(run).not.toHaveBeenCalled();
+    expect(ops.filter((o) => o.kind === "insert-summary")).toHaveLength(0);
+    expect(result).toMatchObject({ summarized: 0, summaryFailed: 0 });
   });
 
   it("is retry-progressive: processes only NULL-summary entries (skips already-summarized)", async () => {
@@ -618,19 +817,19 @@ describe("summarizeFeed", () => {
       { article_id: 2, title: "t2", source: FEED_SRC, url: "https://x/2", summary: "既存要約" },
     ];
     const { db, ops } = makeReadDb({ entries: mixed });
-    const resolveFeedBody = vi.fn(async () => "body");
+    const resolveArticleBody = vi.fn(async () => LONG_BODY);
 
     const result = await summarizeFeed(
       db,
       ai(vi.fn(async () => sseStream("要約"))),
       DIGEST,
       "2026-07-08",
-      { bodyFetchers: { resolveFeedBody }, sleep: noSleep },
+      { bodyFetchers: { resolveArticleBody }, sleep: noSleep },
     );
 
     // Only the un-summarized entry is touched (no re-work of entry 2).
-    expect(resolveFeedBody).toHaveBeenCalledTimes(1);
-    expect(resolveFeedBody).toHaveBeenCalledWith({ url: "https://x/1" });
+    expect(resolveArticleBody).toHaveBeenCalledTimes(1);
+    expect(resolveArticleBody).toHaveBeenCalledWith({ url: "https://x/1" });
     const inserts = ops.filter((o) => o.kind === "insert-summary");
     expect(inserts).toHaveLength(1);
     expect(inserts[0].args[0]).toBe(1);
@@ -641,9 +840,9 @@ describe("summarizeFeed", () => {
     // The UPDATE for entry 1 must happen before entry 2 is even fetched — proving
     // partial progress is durable if the step is interrupted mid-loop.
     const order: string[] = [];
-    const resolveFeedBody = vi.fn(async ({ url }: { url: string }) => {
+    const resolveArticleBody = vi.fn(async ({ url }: { url: string }) => {
       order.push(`fetch:${url}`);
-      return "body";
+      return LONG_BODY;
     });
     const entries2: EntryRow[] = [
       { article_id: 1, title: "t1", source: FEED_SRC, url: "https://x/1" },
@@ -672,7 +871,7 @@ describe("summarizeFeed", () => {
       ai(vi.fn(async () => sseStream("要約"))),
       DIGEST,
       "2026-07-08",
-      { bodyFetchers: { resolveFeedBody }, sleep: noSleep },
+      { bodyFetchers: { resolveArticleBody }, sleep: noSleep },
     );
 
     // entry 1 fetched → entry 1 updated → entry 2 fetched → entry 2 updated.

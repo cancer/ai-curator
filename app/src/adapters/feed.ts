@@ -369,10 +369,3 @@ export async function resolveArticleBody(
   }
   return extractArticleBody(await res.text());
 }
-
-/**
- * 一時的な後方互換エイリアス。daily.ts が旧名 `resolveFeedBody` を import しているため、
- * タスク3（embedding の本文化・daily.ts 改修）が `resolveArticleBody` へ移行するまで
- * ツリー全体の typecheck を保つための橋渡し。移行完了後に削除する。
- */
-export const resolveFeedBody = resolveArticleBody;
