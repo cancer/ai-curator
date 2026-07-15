@@ -12,6 +12,116 @@
 import type { DigestConfig } from "../config";
 
 /**
+ * 記事要約の 4 項目。LLM は固定見出し（想定対象読者／全体の要約／命題／結論）で
+ * プレーンテキストを返すが、ビューアが見出しごとに整形できるよう、生成時にこの構造へ
+ * パースして JSON で保存する（summaries.text）。パースできない出力（見出し欠落など）は
+ * raw に丸ごと入れて欠落させない。旧プレーン行は JSON でないので decode 側で raw 扱いにする。
+ */
+export interface StructuredSummary {
+  audience: string;
+  overview: string;
+  thesis: string;
+  conclusion: string;
+}
+
+/** summaries.text に入れる JSON の形。構造化できた場合と、できなかった raw の 2 系統。 */
+type StoredSummary =
+  | ({ v: 1 } & StructuredSummary)
+  | { v: 1; raw: string };
+
+/** 見出しキー → 表示ラベル。パースと描画の単一の情報源。順序が本文中の出現順。 */
+export const SUMMARY_SECTIONS: { key: keyof StructuredSummary; label: string }[] =
+  [
+    { key: "audience", label: "想定対象読者" },
+    { key: "overview", label: "全体の要約" },
+    { key: "thesis", label: "命題" },
+    { key: "conclusion", label: "結論" },
+  ];
+
+/**
+ * 固定見出しのプレーンテキストを 4 項目へパースする。見出しは順番に現れる前提で、
+ * 直前の見出し以降から次の見出しを探す（本文中に紛れた同語を誤検出しない）。全項目が
+ * 順序どおり見つからなければ null（=構造化失敗、raw 扱い）。見出しは全角「：」半角「:」
+ * どちらでも、先頭の「・」有無も許容する。
+ */
+export function parseStructuredSummary(text: string): StructuredSummary | null {
+  const starts: number[] = [];
+  const valueFrom: number[] = [];
+  let searchFrom = 0;
+  for (const { label } of SUMMARY_SECTIONS) {
+    let sep = `${label}：`;
+    let idx = text.indexOf(sep, searchFrom);
+    if (idx < 0) {
+      sep = `${label}:`;
+      idx = text.indexOf(sep, searchFrom);
+    }
+    if (idx < 0) return null;
+    starts.push(idx);
+    valueFrom.push(idx + sep.length);
+    searchFrom = idx + sep.length;
+  }
+
+  const result = {} as StructuredSummary;
+  for (let i = 0; i < SUMMARY_SECTIONS.length; i++) {
+    const end = i + 1 < starts.length ? starts[i + 1] : text.length;
+    // 次の見出し行の先頭に付く「・」や改行・空白を値から落とす。
+    const value = text
+      .slice(valueFrom[i], end)
+      .replace(/[・\s]+$/u, "")
+      .trim();
+    result[SUMMARY_SECTIONS[i].key] = value;
+  }
+  return result;
+}
+
+/** LLM 生出力を保存用 JSON へ変換する。構造化できなければ raw で保持。 */
+export function encodeSummary(rawText: string): string {
+  const parsed = parseStructuredSummary(rawText);
+  const stored: StoredSummary = parsed
+    ? { v: 1, ...parsed }
+    : { v: 1, raw: rawText };
+  return JSON.stringify(stored);
+}
+
+/**
+ * 保存文字列を描画用に復元する。JSON なら構造化 or raw、JSON でなければ（旧プレーン行）
+ * その文字列を raw として返す。ビューアはこの結果だけを見ればよい。
+ */
+export function decodeSummary(
+  stored: string,
+): { sections: StructuredSummary } | { raw: string } {
+  // raw テキストは、旧プレーン行（見出し付き 4 項目のことが多い）でも構造化できるよう
+  // パースを試み、失敗したときだけ raw のまま返す。これで新規保存分だけでなく既存行も
+  // 見出し付きで整形される。
+  const fromRaw = (raw: string): { sections: StructuredSummary } | { raw: string } => {
+    const parsed = parseStructuredSummary(raw);
+    return parsed ? { sections: parsed } : { raw };
+  };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stored);
+  } catch {
+    return fromRaw(stored); // 旧プレーンテキスト行
+  }
+  const p = parsed as Partial<StoredSummary> & Record<string, unknown>;
+  if (p && p.v === 1 && typeof p.audience === "string") {
+    return {
+      sections: {
+        audience: String(p.audience),
+        overview: String((p as StructuredSummary).overview ?? ""),
+        thesis: String((p as StructuredSummary).thesis ?? ""),
+        conclusion: String((p as StructuredSummary).conclusion ?? ""),
+      },
+    };
+  }
+  if (p && p.v === 1 && typeof p.raw === "string") {
+    return fromRaw(p.raw);
+  }
+  return fromRaw(stored);
+}
+
+/**
  * digest 生成 1 試行分の観測メトリクス（リトライ各回・失敗も含む）。永続化先は
  * 呼び出し側が決める（パイプラインでは D1 digest_metrics へ）。本文・生成テキスト
  * そのものは持たない。
@@ -249,7 +359,7 @@ async function runTextGeneration(
 }
 
 /** 1 記事の要約。本文抜粋は先頭 BODY_EXCERPT_CHARS 字に切り詰める。 */
-export function summarizeArticle(
+export async function summarizeArticle(
   ai: Ai,
   model: string,
   maxTokens: number,
@@ -260,7 +370,7 @@ export function summarizeArticle(
 ): Promise<string> {
   const excerpt = body.slice(0, BODY_EXCERPT_CHARS);
   const user = `タイトル: ${title}\n\n本文抜粋:\n${excerpt}`;
-  return runTextGeneration(
+  const raw = await runTextGeneration(
     ai,
     model,
     maxTokens,
@@ -270,6 +380,8 @@ export function summarizeArticle(
     sleep,
     onMetric,
   );
+  // 4 項目へ構造化して保存する（ビューアが見出しごとに整形できるように）。
+  return encodeSummary(raw);
 }
 
 /** 1 軸の傾向叙述。その軸のタイトル上位群を入力にする。 */

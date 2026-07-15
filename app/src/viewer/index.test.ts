@@ -158,6 +158,31 @@ describe("renderFeedPage", () => {
     expect((html.match(/class="summary"/g) ?? []).length).toBe(1);
   });
 
+  it("renders a structured summary as labelled sections", async () => {
+    const structured = JSON.stringify({
+      v: 1,
+      audience: "読者A",
+      overview: "要約B",
+      thesis: "命題C",
+      conclusion: "結論D",
+    });
+    const env = makeEnv({
+      maxDate: "2026-07-08",
+      entries: [entryRow({ rank: 1, feed_entry_id: 1, summary: structured })],
+    });
+    const html = await (await renderFeedPage(env, 1)).text();
+    // 4 見出しと各本文がセクションとして出る。
+    expect(html).toContain("summary-section");
+    for (const label of ["想定対象読者", "全体の要約", "命題", "結論"]) {
+      expect(html).toContain(label);
+    }
+    for (const body of ["読者A", "要約B", "命題C", "結論D"]) {
+      expect(html).toContain(body);
+    }
+    // コンテナは 1 個。
+    expect((html.match(/class="summary"/g) ?? []).length).toBe(1);
+  });
+
   it("resolves hit_axis to its label and shows source and primary url", async () => {
     const env = makeEnv({
       maxDate: "2026-07-08",

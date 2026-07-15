@@ -10,6 +10,7 @@
 import type { Env } from "../index";
 import { loadConfig } from "../config";
 import { escapeHtml, page, htmlResponse } from "./layout";
+import { decodeSummary, SUMMARY_SECTIONS } from "../lib/summarize";
 
 const PAGE_SIZE = 20;
 
@@ -80,6 +81,29 @@ function renderTrends(trends: TrendRow[], labels: Map<string, string>): string {
   return `<h2>今日の傾向</h2><ul class="trends">${items}</ul>`;
 }
 
+/**
+ * 保存要約（構造化 JSON / raw / 旧プレーン行）を描画する。構造化できていれば見出し
+ * ごとにセクション分けし（`.summary-section` + `<h4>`）、そうでなければ本文をそのまま
+ * 段落で出す。コンテナは常に `.summary` 1 個（既存スタイル・レイアウトの基点）。
+ */
+function renderSummary(stored: string): string {
+  const decoded = decodeSummary(stored);
+  if ("raw" in decoded) {
+    return `<div class="summary"><p>${escapeHtml(decoded.raw)}</p></div>`;
+  }
+  const sections = SUMMARY_SECTIONS.map(({ key, label }) => {
+    const value = decoded.sections[key];
+    if (value === "") return "";
+    return (
+      `<div class="summary-section">` +
+      `<h4>${escapeHtml(label)}</h4>` +
+      `<p>${escapeHtml(value)}</p>` +
+      `</div>`
+    );
+  }).join("");
+  return `<div class="summary">${sections}</div>`;
+}
+
 function renderEntry(entry: EntryRow, labels: Map<string, string>): string {
   const axisLabel =
     entry.hit_axis === null
@@ -88,9 +112,7 @@ function renderEntry(entry: EntryRow, labels: Map<string, string>): string {
           labels.get(entry.hit_axis) ?? entry.hit_axis,
         )}</span>`;
   const summary =
-    entry.summary === null
-      ? ""
-      : `<p class="summary">${escapeHtml(entry.summary)}</p>`;
+    entry.summary === null ? "" : renderSummary(entry.summary);
   const url = escapeHtml(entry.url);
   return (
     `<li>` +

@@ -38,6 +38,11 @@ label { display: block; margin: 0.5rem 0 0.2rem; font-weight: bold; }
 .error { color: #c00; font-weight: bold; }
 .rank { font-weight: bold; margin-right: 0.3rem; }
 fieldset { margin: 1rem 0; }
+.summary { margin: 0.6rem 0; }
+.summary-section { margin: 0.5rem 0; }
+.summary-section h4 { font-size: 0.8rem; margin: 0 0 0.15rem; opacity: 0.7;
+  font-weight: bold; letter-spacing: 0.02em; }
+.summary-section p { margin: 0; }
 `;
 
 /** HTML 文書の骨格を組み立てる。title はエスケープ済みで挿入する。 */
