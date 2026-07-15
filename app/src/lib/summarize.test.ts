@@ -7,6 +7,7 @@ import {
 } from "./summarize";
 import { sseStream } from "../../test/sse";
 import type { DigestMetric } from "./summarize";
+import { decodeSummary, parseStructuredSummary } from "./summarize";
 
 interface RunArgs {
   messages: { role: string; content: string }[];
@@ -40,7 +41,7 @@ describe("summarizeArticle", () => {
 
     const result = await summarizeArticle(ai, "@cf/model", 300, "記事タイトル", "本文");
 
-    expect(result).toBe("これは要約です。");
+    expect(decodeSummary(result)).toEqual({ raw: "これは要約です。" });
     expect(calls).toHaveLength(1);
     expect(calls[0].model).toBe("@cf/model");
     expect(calls[0].options.max_tokens).toBe(300);
@@ -87,7 +88,7 @@ describe("summarizeArticle", () => {
       noSleep,
     );
 
-    expect(result).toBe("リトライ後の要約");
+    expect(decodeSummary(result)).toEqual({ raw: "リトライ後の要約" });
     expect(attempts).toBe(2);
   });
 
@@ -216,8 +217,8 @@ describe("summarizeEntries", () => {
     );
 
     expect(failed).toBe(0);
-    expect(summaries.get(1)).toBe("s");
-    expect(summaries.get(2)).toBe("s");
+    expect(decodeSummary(summaries.get(1)!)).toEqual({ raw: "s" });
+    expect(decodeSummary(summaries.get(2)!)).toEqual({ raw: "s" });
   });
 
   it("falls back to feedSummary when the body resolver returns null (body-less source)", async () => {
@@ -236,7 +237,7 @@ describe("summarizeEntries", () => {
     );
 
     expect(failed).toBe(0);
-    expect(summaries.get(1)).toBe("s");
+    expect(decodeSummary(summaries.get(1)!)).toEqual({ raw: "s" });
     expect(capturedBody).toContain("これはフィード要約");
   });
 
@@ -254,8 +255,8 @@ describe("summarizeEntries", () => {
     );
 
     expect(failed).toBe(0);
-    expect(summaries.get(1)).toBe("s");
-    expect(summaries.get(2)).toBe("s");
+    expect(decodeSummary(summaries.get(1)!)).toEqual({ raw: "s" });
+    expect(decodeSummary(summaries.get(2)!)).toEqual({ raw: "s" });
   });
 
   it("excludes an entry whose summarization fails but keeps processing the rest", async () => {
@@ -281,7 +282,7 @@ describe("summarizeEntries", () => {
 
     expect(failed).toBe(1);
     expect(summaries.has(1)).toBe(false);
-    expect(summaries.get(2)).toBe("ok");
+    expect(decodeSummary(summaries.get(2)!)).toEqual({ raw: "ok" });
   });
 
   it("invokes onSummary per successful entry (persistence hook), not for failed ones", async () => {
@@ -312,7 +313,9 @@ describe("summarizeEntries", () => {
 
     // Only the surviving entry is persisted; the failed one never reaches onSummary.
     expect(failed).toBe(1);
-    expect(persisted).toEqual([[2, "ok"]]);
+    expect(persisted.map(([id, sm]) => [id, decodeSummary(sm)])).toEqual([
+      [2, { raw: "ok" }],
+    ]);
   });
 
   it("counts an entry as failed when onSummary (persistence) throws, and keeps going", async () => {
@@ -334,6 +337,86 @@ describe("summarizeEntries", () => {
 
     expect(failed).toBe(1);
     expect(summaries.has(1)).toBe(false);
-    expect(summaries.get(2)).toBe("ok");
+    expect(decodeSummary(summaries.get(2)!)).toEqual({ raw: "ok" });
+  });
+});
+
+describe("parseStructuredSummary", () => {
+  const FOUR = [
+    "・想定対象読者：技術者向け",
+    "・全体の要約：AとBが議論された。CはDと述べた。",
+    "・命題：統一的な命題は明示されていない",
+    "・結論：統一的な結論は明示されていない",
+  ].join("\n");
+
+  it("splits the fixed four headings into fields", () => {
+    expect(parseStructuredSummary(FOUR)).toEqual({
+      audience: "技術者向け",
+      overview: "AとBが議論された。CはDと述べた。",
+      thesis: "統一的な命題は明示されていない",
+      conclusion: "統一的な結論は明示されていない",
+    });
+  });
+
+  it("tolerates a missing 「・」 bullet and half-width colon", () => {
+    const noBullet =
+      "想定対象読者:読者\n全体の要約:ようやく\n命題:めいだい\n結論:けつろん";
+    expect(parseStructuredSummary(noBullet)).toEqual({
+      audience: "読者",
+      overview: "ようやく",
+      thesis: "めいだい",
+      conclusion: "けつろん",
+    });
+  });
+
+  it("returns null when a heading is missing (falls back to raw)", () => {
+    const missing = "・想定対象読者：x\n・全体の要約：y\n・結論：z";
+    expect(parseStructuredSummary(missing)).toBeNull();
+  });
+});
+
+describe("summarizeArticle structured output", () => {
+  it("stores the four-part summary as decodable structured sections", async () => {
+    const four = [
+      "・想定対象読者：エンジニア",
+      "・全体の要約：本文の主旨。",
+      "・命題：主張X",
+      "・結論：結論Y",
+    ].join("\n");
+    const { ai } = mockAi(async () => four);
+
+    const result = await summarizeArticle(ai, "@cf/model", 4000, "t", "b");
+
+    expect(decodeSummary(result)).toEqual({
+      sections: {
+        audience: "エンジニア",
+        overview: "本文の主旨。",
+        thesis: "主張X",
+        conclusion: "結論Y",
+      },
+    });
+  });
+});
+
+describe("decodeSummary", () => {
+  it("structures a legacy plain-text summary (no JSON) into sections", () => {
+    const legacy = [
+      "・想定対象読者：読者",
+      "・全体の要約：ようやく",
+      "・命題：めいだい",
+      "・結論：けつろん",
+    ].join("\n");
+    expect(decodeSummary(legacy)).toEqual({
+      sections: {
+        audience: "読者",
+        overview: "ようやく",
+        thesis: "めいだい",
+        conclusion: "けつろん",
+      },
+    });
+  });
+
+  it("keeps unparseable text as raw", () => {
+    expect(decodeSummary("ただの一文です")).toEqual({ raw: "ただの一文です" });
   });
 });
