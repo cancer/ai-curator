@@ -75,11 +75,11 @@ const TREND_SYSTEM =
 /**
  * SSE ストリームから最終回答テキストだけを取り出す。
  *
- * digest モデル（Gemma 4）は built-in thinking の推論モデルで、同期 AI.run だと
- * 推論生成が ~60s ゲートウェイに達し 504 になる。stream:true なら最初のバイトが
- * すぐ流れて接続が維持されるため 504 を回避できる。返却は行区切りの SSE で、
- * 各データ行は JSON。可視回答は choices[0].delta.content（OpenAI 互換形式）または
- * response（従来形式）に入る。delta.reasoning（推論チャンク）は要約に含めない。
+ * digest モデルは推論モデルなので、可視回答の前に推論トークンを生成する。同期 AI.run
+ * だと推論生成が長引くと ~60s ゲートウェイに達し 504 になりうるため stream:true で呼ぶ
+ * （最初のバイトがすぐ流れて接続が維持される）。返却は行区切りの SSE で、各データ行は
+ * JSON。可視回答は response（従来形式）または choices[0].delta.content（OpenAI 互換形式）に
+ * 入る。delta.reasoning（推論チャンク）は要約に含めない。
  */
 /** ストリーム消費の結果。content 以外は観測用メタ（finish_reason・使用トークン）。 */
 interface StreamedGeneration {
@@ -123,9 +123,16 @@ async function collectStreamedContent(
           choices?: { delta?: { content?: unknown }; finish_reason?: unknown }[];
           usage?: { completion_tokens?: unknown };
         };
-        if (typeof c.response === "string") content += c.response;
+        // 可視回答は response（従来形式）と choices[].delta.content（OpenAI 互換形式）の
+        // どちらかに入る。モデルによっては 1 チャンクに両方同じデルタが載るため、
+        // 両方を足すと二重化する（Qwen3 で観測）。非空の response を優先し、無ければ
+        // choices 側を使う（どちらか一方だけ加算する）。
         const deltaContent = c.choices?.[0]?.delta?.content;
-        if (typeof deltaContent === "string") content += deltaContent;
+        if (typeof c.response === "string" && c.response !== "") {
+          content += c.response;
+        } else if (typeof deltaContent === "string") {
+          content += deltaContent;
+        }
         const fr = c.choices?.[0]?.finish_reason;
         if (typeof fr === "string") finishReason = fr;
         const ct = c.usage?.completion_tokens;
