@@ -418,6 +418,10 @@ export interface SummarizeResult {
  * 本文を resolveBody で解決し、取得できなければ feedSummary にフォールバック
  * する。1 件の要約失敗は try/catch で除外し件数を数えて、ループは止めない。
  *
+ * minBodyChars: 解決した本文（body ?? feedSummary）が閾値未満なら LLM を呼ばず、onSummary も
+ * 呼ばず、summaries にも入れない。スニペット/空からの退化要約を抑止するためのスキップで、
+ * 失敗（failed）とは別に数える（そのエントリは要約なしで、ビューアが省略する）。
+ *
  * onSummary を渡すと、1 件を要約できた直後に呼ぶ（永続化フック）。呼び出し側が
  * 「要約→即保存」を per-entry で行い部分進捗を残せるようにするためで、保存の失敗は
  * その 1 件の失敗として扱い（failed に計上）ループは続ける。
@@ -427,12 +431,14 @@ export async function summarizeEntries(
   digest: DigestConfig,
   targets: SummaryTarget[],
   resolveBody: (target: SummaryTarget) => Promise<string | null>,
+  minBodyChars: number,
   sleep?: (ms: number) => Promise<void>,
   onSummary?: (articleId: number, summary: string) => Promise<void>,
   onMetric?: OnDigestMetric,
 ): Promise<SummarizeResult> {
   const summaries = new Map<number, string>();
   let failed = 0;
+  let skipped = 0;
 
   for (const target of targets) {
     try {
@@ -447,6 +453,12 @@ export async function summarizeEntries(
       }
 
       const text = body ?? target.feedSummary ?? "";
+      // 退化要約の抑止: 本文が閾値未満（スニペット・空を含む）なら要約を作らない。
+      // LLM も onSummary も呼ばず、summaries に入れない（failed ではなくスキップ）。
+      if (text.length < minBodyChars) {
+        skipped += 1;
+        continue;
+      }
       const summary = await summarizeArticle(
         ai,
         digest.model,
@@ -469,6 +481,11 @@ export async function summarizeEntries(
     }
   }
 
+  if (skipped > 0) {
+    console.log(
+      `summarize: ${skipped} entr(ies) skipped (body below ${minBodyChars} chars)`,
+    );
+  }
   if (failed > 0) {
     console.log(`summarize: ${failed} entr(ies) excluded due to errors`);
   }

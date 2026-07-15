@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   summarizeArticle,
   summarizeTrend,
@@ -214,6 +214,7 @@ describe("summarizeEntries", () => {
       digest,
       [target({ articleId: 1 }), target({ articleId: 2 })],
       resolveBody,
+      0,
     );
 
     expect(failed).toBe(0);
@@ -234,6 +235,7 @@ describe("summarizeEntries", () => {
       digest,
       [target({ articleId: 1, feedSummary: "これはフィード要約" })],
       resolveBody,
+      0,
     );
 
     expect(failed).toBe(0);
@@ -252,11 +254,67 @@ describe("summarizeEntries", () => {
       digest,
       [target({ articleId: 1 }), target({ articleId: 2 })],
       resolveBody,
+      0,
     );
 
     expect(failed).toBe(0);
     expect(decodeSummary(summaries.get(1)!)).toEqual({ raw: "s" });
     expect(decodeSummary(summaries.get(2)!)).toEqual({ raw: "s" });
+  });
+
+  it("skips an entry whose resolved text is below the minimum body length (no LLM, no summary)", async () => {
+    const { ai, calls } = mockAi(async () => "s");
+    const resolveBody = async () => "短い抜粋"; // below the threshold
+    const onSummary = vi.fn(async () => {});
+
+    const { summaries, failed } = await summarizeEntries(
+      ai,
+      digest,
+      [target({ articleId: 1, feedSummary: null })],
+      resolveBody,
+      500,
+      undefined,
+      onSummary,
+    );
+
+    // Degenerate summaries are suppressed: the LLM is never called and no row is produced.
+    expect(calls).toHaveLength(0);
+    expect(onSummary).not.toHaveBeenCalled();
+    expect(summaries.size).toBe(0);
+    expect(failed).toBe(0); // skipped, not failed
+  });
+
+  it("skips an entry when no text is available at all (body null, no feedSummary)", async () => {
+    const { ai, calls } = mockAi(async () => "s");
+
+    const { summaries, failed } = await summarizeEntries(
+      ai,
+      digest,
+      [target({ articleId: 1, feedSummary: null })],
+      async () => null,
+      500,
+    );
+
+    expect(calls).toHaveLength(0);
+    expect(summaries.size).toBe(0);
+    expect(failed).toBe(0);
+  });
+
+  it("summarizes an entry whose resolved body meets the minimum length", async () => {
+    const { ai, calls } = mockAi(async () => "s");
+    const body = "本文".repeat(300); // ≥ 500 chars
+
+    const { summaries, failed } = await summarizeEntries(
+      ai,
+      digest,
+      [target({ articleId: 1 })],
+      async () => body,
+      500,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(decodeSummary(summaries.get(1)!)).toEqual({ raw: "s" });
+    expect(failed).toBe(0);
   });
 
   it("excludes an entry whose summarization fails but keeps processing the rest", async () => {
@@ -277,6 +335,7 @@ describe("summarizeEntries", () => {
         target({ articleId: 2, title: "通る記事" }),
       ],
       resolveBody,
+      0,
       noSleep,
     );
 
@@ -307,6 +366,7 @@ describe("summarizeEntries", () => {
         target({ articleId: 2, title: "通る記事" }),
       ],
       resolveBody,
+      0,
       noSleep,
       onSummary,
     );
@@ -331,6 +391,7 @@ describe("summarizeEntries", () => {
       digest,
       [target({ articleId: 1 }), target({ articleId: 2 })],
       resolveBody,
+      0,
       noSleep,
       onSummary,
     );
