@@ -1,11 +1,29 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// htmlToText は Workers 組込みの HTMLRewriter の薄いラッパ。その挙動(タグ除去・ブロック
+// 区切り・root/exclude)はプラットフォームの責務なのでここでは検証しない=信頼する。
+// モックに差し替え、feed 自身のロジック(フィールドマッピング・本文解決のオーケストレーション・
+// 抽出カスケード)だけを検証する。これにより feed.test は workerd に依存せず素の Node で走る。
+vi.mock("../lib/html", () => ({
+  htmlToText: vi.fn(),
+}));
+
 import {
   deriveMediumFeedUrl,
   parseFeed,
   resolveArticleBody,
   selectHref,
 } from "./feed";
+import { htmlToText } from "../lib/html";
 import type { NormalizedArticle } from "./types";
+
+const htmlToTextMock = vi.mocked(htmlToText);
+
+beforeEach(() => {
+  // 既定は恒等モック。カスケード検証をするテストだけが per-call で上書きする。
+  htmlToTextMock.mockReset();
+  htmlToTextMock.mockImplementation(async (html: string) => html);
+});
 
 // すべて架空の合成データ（実在フィードのコピペではない）。形式だけ本物を模す。
 
@@ -41,7 +59,7 @@ const ATOM = `<?xml version="1.0" encoding="UTF-8"?>
 </feed>`;
 
 describe("parseFeed", () => {
-  it("parses RSS: content:encoded -> body, description -> feedSummary, url normalized, source=feed:url", async () => {
+  it("maps RSS fields: content:encoded -> body, description -> feedSummary (body preferred), url normalized, source=feed:url", async () => {
     const articles = await parseFeed(RSS, "https://blog.example/feed");
     expect(articles).toHaveLength(2);
 
@@ -51,18 +69,17 @@ describe("parseFeed", () => {
     // utm_source が正規化で除去される。
     expect(a.url).toBe("https://blog.example/widgets");
     expect(a.publishedAt).toBe("2026-07-08T00:00:00.000Z");
-    // content:encoded があれば body（プレーンテキスト化）。
-    expect(a.body).toContain("Full imaginary body about widgets");
-    expect(a.body).not.toContain("<b>");
-    // feedSummary は本文優先（content:encoded）。
-    expect(a.feedSummary).toContain("Full imaginary body about widgets");
+    // content:encoded を htmlToText に通した結果を body に入れる(恒等モック)。
+    expect(a.body).toContain("Full imaginary body about");
+    // feedSummary は本文(content:encoded)優先なので body と同じソースから来る。
+    expect(a.feedSummary).toBe(a.body);
 
     // content:encoded が無ければ body 無し・feedSummary は description。
     expect(b.body).toBeUndefined();
-    expect(b.feedSummary).toBe("Only a snippet here.");
+    expect(b.feedSummary).toContain("Only a snippet here.");
   });
 
-  it("parses Atom: content -> body/feedSummary, alternate link selected, source=feed:url", async () => {
+  it("maps Atom fields: content -> body/feedSummary, alternate link selected, source=feed:url", async () => {
     const articles = await parseFeed(ATOM, "https://site.example/atom");
     expect(articles).toHaveLength(1);
     const a = articles[0];
@@ -70,7 +87,7 @@ describe("parseFeed", () => {
     expect(a.url).toBe("https://site.example/essay");
     expect(a.source).toBe("feed:https://site.example/atom");
     expect(a.body).toContain("Imaginary essay body.");
-    expect(a.body).not.toContain("<main>");
+    expect(a.feedSummary).toBe(a.body);
   });
 
   it("throws on XML that is neither RSS nor Atom", () => {
@@ -140,7 +157,7 @@ describe("deriveMediumFeedUrl", () => {
   });
 });
 
-describe("resolveArticleBody", () => {
+describe("resolveArticleBody: orchestration", () => {
   it("returns in-memory inline body without fetching", async () => {
     const body = await resolveArticleBody(
       { url: "https://x/a", body: "INLINE", feedSummary: "snippet" },
@@ -159,17 +176,28 @@ describe("resolveArticleBody", () => {
       { url: "https://x/a", feedSummary: "snippet" },
       {
         fetch: async () =>
-          new Response(
-            "<html><body><main><p>Real fetched body.</p></main></body></html>",
-            { status: 200 },
-          ),
+          new Response("<main><p>Real fetched body.</p></main>", {
+            status: 200,
+          }),
         sleep: async () => {},
       },
     );
-    expect(body).toBe("Real fetched body.");
+    expect(body).toContain("Real fetched body.");
   });
 
-  it("returns null when the real body cannot be resolved, even if feedSummary exists", async () => {
+  it("fetches when neither body nor feedSummary is present", async () => {
+    const body = await resolveArticleBody(
+      { url: "https://x/a" },
+      {
+        fetch: async () =>
+          new Response("<p>Fetched text.</p>", { status: 200 }),
+        sleep: async () => {},
+      },
+    );
+    expect(body).toContain("Fetched text.");
+  });
+
+  it("returns null when the real body cannot be resolved (non-ok), even if feedSummary exists", async () => {
     const body = await resolveArticleBody(
       { url: "https://x/a", feedSummary: "snippet" },
       {
@@ -180,85 +208,48 @@ describe("resolveArticleBody", () => {
     expect(body).toBeNull();
   });
 
-  it("fetches and crudely extracts the link when neither body nor feedSummary", async () => {
+  it("returns null when the fetch throws", async () => {
     const body = await resolveArticleBody(
       { url: "https://x/a" },
       {
-        fetch: async () =>
-          new Response("<html><body><p>Fetched text.</p></body></html>", {
-            status: 200,
-          }),
+        fetch: async () => {
+          throw new Error("network down");
+        },
         sleep: async () => {},
       },
     );
-    expect(body).toContain("Fetched text.");
+    expect(body).toBeNull();
   });
+});
 
-  it("prefers the main element when extracting a fetched article", async () => {
+describe("resolveArticleBody: extraction cascade", () => {
+  // extractArticleBody は htmlToText を main → article → 全体 の順で試し、最初の非空を
+  // 採用する。htmlToText 自体(root/exclude の意味論)はプラットフォーム側なので検証せず、
+  // モックの返り値でカスケードの分岐だけを確認する。
+  it("tries main, then article, then the whole page, and takes the first non-empty", async () => {
+    htmlToTextMock
+      .mockResolvedValueOnce("") // main: 空
+      .mockResolvedValueOnce("ARTICLE BODY"); // article: 非空 → 採用
     const body = await resolveArticleBody(
       { url: "https://x/a" },
       {
-        fetch: async () =>
-          new Response(
-            "<html><body><nav>Site menu</nav><main><p>Article body.</p></main><footer>Copyright</footer></body></html>",
-            { status: 200 },
-          ),
+        fetch: async () => new Response("<html/>", { status: 200 }),
         sleep: async () => {},
       },
     );
-    expect(body).toBe("Article body.");
+    expect(body).toBe("ARTICLE BODY");
+    expect(htmlToTextMock.mock.calls[0]?.[1]).toMatchObject({ root: "main" });
+    expect(htmlToTextMock.mock.calls[1]?.[1]).toMatchObject({
+      root: "article",
+    });
   });
 
-  it("falls back to the article element when there is no main", async () => {
+  it("returns null when every cascade stage is empty", async () => {
+    htmlToTextMock.mockResolvedValue("");
     const body = await resolveArticleBody(
       { url: "https://x/a" },
       {
-        fetch: async () =>
-          new Response(
-            "<html><body><nav>Menu</nav><article><p>The real article text.</p></article><footer>Foot</footer></body></html>",
-            { status: 200 },
-          ),
-        sleep: async () => {},
-      },
-    );
-    expect(body).toBe("The real article text.");
-  });
-
-  it("falls back to the whole page when there is neither main nor article", async () => {
-    const body = await resolveArticleBody(
-      { url: "https://x/a" },
-      {
-        fetch: async () =>
-          new Response(
-            "<html><body><div><p>Just a plain div body.</p></div></body></html>",
-            { status: 200 },
-          ),
-        sleep: async () => {},
-      },
-    );
-    expect(body).toBe("Just a plain div body.");
-  });
-
-  it("excludes nav/footer/aside/header from the extracted body", async () => {
-    const body = await resolveArticleBody(
-      { url: "https://x/a" },
-      {
-        fetch: async () =>
-          new Response(
-            "<html><body><main><header>Section head</header><aside>Sidebar</aside><p>Core content.</p></main></body></html>",
-            { status: 200 },
-          ),
-        sleep: async () => {},
-      },
-    );
-    expect(body).toBe("Core content.");
-  });
-
-  it("returns null when the link fetch fails", async () => {
-    const body = await resolveArticleBody(
-      { url: "https://x/a" },
-      {
-        fetch: async () => new Response("nope", { status: 500 }),
+        fetch: async () => new Response("<html/>", { status: 200 }),
         sleep: async () => {},
       },
     );
@@ -297,7 +288,7 @@ describe("resolveArticleBody: Medium feed recovery", () => {
         sleep: async () => {},
       },
     );
-    expect(body).toBe("Full body of post one about widgets.");
+    expect(body).toContain("Full body of post one about widgets.");
   });
 
   it("recovers the Medium body even when a feedSummary snippet is present", async () => {
@@ -313,7 +304,7 @@ describe("resolveArticleBody: Medium feed recovery", () => {
         sleep: async () => {},
       },
     );
-    expect(body).toBe("Full body of post one about widgets.");
+    expect(body).toContain("Full body of post one about widgets.");
   });
 
   it("fetches the derived feed only once for two articles from the same source", async () => {
@@ -331,8 +322,8 @@ describe("resolveArticleBody: Medium feed recovery", () => {
       { url: "https://medium.com/@alice/post-two-def" },
       { fetch, sleep: async () => {}, mediumFeedCache },
     );
-    expect(b1).toBe("Full body of post one about widgets.");
-    expect(b2).toBe("Full body of post two about gadgets.");
+    expect(b1).toContain("Full body of post one about widgets.");
+    expect(b2).toContain("Full body of post two about gadgets.");
     expect(calls).toBe(1);
   });
 
@@ -342,15 +333,14 @@ describe("resolveArticleBody: Medium feed recovery", () => {
       if (url.includes("/feed/")) {
         return new Response(MEDIUM_FEED, { status: 200 });
       }
-      return new Response(
-        "<html><body><main><p>Page fallback body.</p></main></body></html>",
-        { status: 200 },
-      );
+      return new Response("<main><p>Page fallback body.</p></main>", {
+        status: 200,
+      });
     };
     const body = await resolveArticleBody(
       { url: "https://medium.com/@alice/unknown-post" },
       { fetch, sleep: async () => {} },
     );
-    expect(body).toBe("Page fallback body.");
+    expect(body).toContain("Page fallback body.");
   });
 });
