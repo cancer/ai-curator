@@ -64,6 +64,9 @@ function makeEnv(opts: {
           if (s.includes("MAX(date)")) {
             return { date: opts.maxDate } as unknown as T;
           }
+          if (s.includes("COUNT(*)")) {
+            return { total: entries.length } as unknown as T;
+          }
           return null;
         },
         async all<T>() {
@@ -227,28 +230,60 @@ describe("renderFeedPage", () => {
       entryRow({ rank: i + 1, feed_entry_id: i + 1, title: `T${i + 1}` }),
     );
 
-    it("page 1 shows ranks 1-20 and a 'もっと見る' link to page 2", async () => {
+    it("page 1 shows ranks 1-20, a 次へ link to page 2, no 前へ, and the totals", async () => {
       const env = makeEnv({ maxDate: "2026-07-08", entries: forty });
       const html = await (await renderFeedPage(env, 1)).text();
       expect(html).toContain("T1");
       expect(html).toContain("T20");
       expect(html).not.toContain(">T21<");
+      // 次へ は page 2 へ、前へ は最初のページなので出さない
       expect(html).toContain('href="/?page=2"');
+      expect(html).not.toContain('href="/?page=0"');
+      // 総ページ数・総件数・現在ページを表示する
+      expect(html).toContain("1 / 2");
+      expect(html).toContain("全40件");
+      // 「もっと見る」は廃止した
+      expect(html).not.toContain("もっと見る");
     });
 
-    it("page 2 shows ranks 21-40 and hides 'もっと見る' on the last page", async () => {
+    it("page 2 shows ranks 21-40, a 前へ link to page 1, and no 次へ on the last page", async () => {
       const env = makeEnv({ maxDate: "2026-07-08", entries: forty });
       const html = await (await renderFeedPage(env, 2)).text();
       expect(html).toContain("T21");
       expect(html).toContain("T40");
       expect(html).not.toContain(">T20<");
-      expect(html).not.toContain("もっと見る");
+      expect(html).toContain('href="/?page=1"');
+      expect(html).not.toContain('href="/?page=3"');
+      expect(html).toContain("2 / 2");
+      expect(html).toContain("全40件");
     });
 
     it("clamps a non-positive or non-numeric page to 1", async () => {
       const env = makeEnv({ maxDate: "2026-07-08", entries: forty });
       const html = await (await renderFeedPage(env, 0)).text();
       expect(html).toContain("T1");
+      expect(html).toContain("1 / 2");
+    });
+
+    it("clamps a page beyond the last to the last page", async () => {
+      const env = makeEnv({ maxDate: "2026-07-08", entries: forty });
+      const html = await (await renderFeedPage(env, 999)).text();
+      expect(html).toContain("T21");
+      expect(html).toContain("T40");
+      expect(html).toContain("2 / 2");
+      expect(html).not.toContain('href="/?page=1000"');
+    });
+
+    it("shows a single page with neither 前へ nor 次へ when entries fit one page", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: forty.slice(0, 5),
+      });
+      const html = await (await renderFeedPage(env, 1)).text();
+      expect(html).toContain("1 / 1");
+      expect(html).toContain("全5件");
+      expect(html).not.toContain('href="/?page=2"');
+      expect(html).not.toContain('href="/?page=0"');
     });
   });
 });

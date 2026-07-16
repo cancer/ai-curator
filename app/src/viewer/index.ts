@@ -21,7 +21,7 @@ const TRENDS_SQL =
   "WHERE date = ? ORDER BY hit_count DESC";
 
 // 要約は summaries に分離済み（1 記事 1 行）。行が無ければ summary は NULL。
-// LIMIT は PAGE_SIZE+1 件取り、余りの有無で次ページの存在を判定する。
+// LIMIT/OFFSET で 1 ページ分だけ取る。総件数は COUNT_SQL で別途数える。
 const ENTRIES_SQL =
   "SELECT fe.id AS feed_entry_id, fe.rank AS rank, s.text AS summary, " +
   "a.title AS title, a.source AS source, a.published_at AS published_at, " +
@@ -29,6 +29,10 @@ const ENTRIES_SQL =
   "FROM feed_entries fe JOIN articles a ON a.id = fe.article_id " +
   "LEFT JOIN summaries s ON s.article_id = fe.article_id " +
   "WHERE fe.date = ? ORDER BY fe.rank LIMIT ? OFFSET ?";
+
+// その日の総件数。総ページ数・現在位置・前後リンクの有無を決めるのに使う。
+const COUNT_SQL =
+  "SELECT COUNT(*) AS total FROM feed_entries WHERE date = ?";
 
 interface EntryRow {
   feed_entry_id: number;
@@ -128,13 +132,32 @@ function renderEntry(entry: EntryRow, labels: Map<string, string>): string {
   );
 }
 
-/** 最新フィードを 1 ページ分レンダリングする。page は 1 未満を 1 に丸める。 */
+/**
+ * ページネーション UI。前へ / 次へ（両端では出さない）と、現在ページ・総ページ数・
+ * 総件数を出す。総ページ数と総件数で「あとどれくらいあるか」を読み手に示す。
+ */
+function renderPagination(
+  current: number,
+  totalPages: number,
+  total: number,
+): string {
+  const prev =
+    current > 1
+      ? `<a href="/?page=${current - 1}">前へ</a>`
+      : `<span class="disabled">前へ</span>`;
+  const next =
+    current < totalPages
+      ? `<a href="/?page=${current + 1}">次へ</a>`
+      : `<span class="disabled">次へ</span>`;
+  const status = `<span class="meta">${current} / ${totalPages}（全${total}件）</span>`;
+  return `<nav class="pagination">${prev} ${status} ${next}</nav>`;
+}
+
+/** 最新フィードを 1 ページ分レンダリングする。page は範囲外を 1..総ページ数 に丸める。 */
 export async function renderFeedPage(
   env: Env,
   pageNumber: number,
 ): Promise<Response> {
-  const current = Number.isInteger(pageNumber) && pageNumber > 0 ? pageNumber : 1;
-
   const latest = await env.DB.prepare(MAX_DATE_SQL).first<{
     date: string | null;
   }>();
@@ -152,27 +175,32 @@ export async function renderFeedPage(
   const trendRows =
     (await env.DB.prepare(TRENDS_SQL).bind(date).all<TrendRow>()).results ?? [];
 
+  const countRow = await env.DB.prepare(COUNT_SQL).bind(date).first<{
+    total: number;
+  }>();
+  const total = countRow?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  const requested =
+    Number.isInteger(pageNumber) && pageNumber > 0 ? pageNumber : 1;
+  const current = Math.min(requested, totalPages);
+
   const offset = (current - 1) * PAGE_SIZE;
-  const fetched =
+  const entries =
     (
       await env.DB.prepare(ENTRIES_SQL)
-        .bind(date, PAGE_SIZE + 1, offset)
+        .bind(date, PAGE_SIZE, offset)
         .all<EntryRow>()
     ).results ?? [];
-  const hasNext = fetched.length > PAGE_SIZE;
-  const entries = fetched.slice(0, PAGE_SIZE);
 
   const list = entries.map((e) => renderEntry(e, labels)).join("");
-  const more = hasNext
-    ? `<p><a href="/?page=${current + 1}">もっと見る</a></p>`
-    : "";
 
   const body =
     `<h1>フィード <span class="meta">${escapeHtml(date)}</span></h1>` +
     `<p><a href="/settings">設定</a></p>` +
     renderTrends(trendRows, labels) +
     `<h2>記事</h2><ul class="entries">${list}</ul>` +
-    more +
+    renderPagination(current, totalPages, total) +
     `<script>${FEEDBACK_SCRIPT}</script>`;
 
   return htmlResponse(page("フィード", body));
