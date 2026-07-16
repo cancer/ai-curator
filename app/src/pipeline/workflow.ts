@@ -66,7 +66,7 @@ export async function runDailyWorkflow(
   const windowStart = new Date(runAt.getTime() - WINDOW_HOURS * 3600 * 1000);
   const date = runAt.toISOString().slice(0, 10);
 
-  // load-config: KV から設定を読む（KV 読取の実証点）。設定不正は決定論的な失敗
+  // load-config: D1 から設定を読む（設定読取の実証点）。設定不正は決定論的な失敗
   // なので NonRetryableError にして即失敗させる（5 回のリトライを浪費しない）。
   const config = await step.do("load-config", STEP_CONFIG, async () => {
     try {
