@@ -22,6 +22,11 @@ import type { Env } from "./index";
 export interface InterestAxis {
   id: string;
   label: string;
+  /**
+   * 関心軸のカテゴリ（グループ）。未分類は key ごと省略する（null/空文字を持たせない）。
+   * これにより toEqual 系の比較や embedding 側の期待に null ノイズを混ぜない。
+   */
+  category?: string;
 }
 
 /**
@@ -148,10 +153,16 @@ function validateInterestAxis(axis: unknown): InterestAxis {
     throw new Error("InterestAxis.label must be a non-empty string");
   }
 
-  return {
-    id: obj.id,
-    label: obj.label,
-  };
+  // category は任意。string 以外は拒否し、trim 後が空なら「未分類」として key を落とす。
+  if (obj.category !== undefined && typeof obj.category !== "string") {
+    throw new Error("InterestAxis.category must be a string");
+  }
+  const category =
+    typeof obj.category === "string" ? obj.category.trim() : "";
+
+  return category === ""
+    ? { id: obj.id, label: obj.label }
+    : { id: obj.id, label: obj.label, category };
 }
 
 /** http(s):// で始まる URL か（feeds 要素の検証用）。 */
@@ -236,8 +247,8 @@ async function readUserConfig(db: D1Database): Promise<UserConfig> {
   const axisRows =
     (
       await db
-        .prepare("SELECT axis_id, label FROM interest_axes ORDER BY id")
-        .all<{ axis_id: string; label: string }>()
+        .prepare("SELECT axis_id, label, category FROM interest_axes ORDER BY id")
+        .all<{ axis_id: string; label: string; category: string | null }>()
     ).results ?? [];
   const feedRows =
     (
@@ -247,7 +258,12 @@ async function readUserConfig(db: D1Database): Promise<UserConfig> {
     ).results ?? [];
 
   return {
-    interestAxes: axisRows.map((r) => ({ id: r.axis_id, label: r.label })),
+    // category が null/空なら key ごと省略する（未分類。null ノイズを混ぜない）。
+    interestAxes: axisRows.map((r) =>
+      r.category != null && r.category !== ""
+        ? { id: r.axis_id, label: r.label, category: r.category }
+        : { id: r.axis_id, label: r.label },
+    ),
     sources: { feeds: feedRows.map((r) => r.url) },
   };
 }
@@ -276,9 +292,10 @@ export async function saveConfig(env: Env, user: UserConfig): Promise<void> {
   for (const axis of validated.interestAxes) {
     statements.push(
       env.DB.prepare(
-        "INSERT INTO interest_axes (axis_id, label) VALUES (?, ?) " +
-          "ON CONFLICT(axis_id) DO UPDATE SET label = excluded.label"
-      ).bind(axis.id, axis.label)
+        "INSERT INTO interest_axes (axis_id, label, category) VALUES (?, ?, ?) " +
+          "ON CONFLICT(axis_id) DO UPDATE SET label = excluded.label, " +
+          "category = excluded.category"
+      ).bind(axis.id, axis.label, axis.category ?? null)
     );
   }
   // config から消えた軸を除去する（検証で軸 ≥ 1 保証済みなので IN は非空）。
