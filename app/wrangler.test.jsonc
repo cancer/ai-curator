@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // テスト専用の Worker 定義。本番 wrangler.jsonc とは別に持つ理由:
+  // - 本番の `ai` binding は Workers AI へリモート接続するため（ローカル再現不可）、
+  //   これを読み込むとテスト起動時に Cloudflare 認証を要求して詰まる。
+  // - テストは binding を実際には消費せず、各テストがモック env を直接渡している。
+  //   したがってテスト用 Worker に本番 binding（ai / d1 / kv / workflows）は不要。
+  // ここには workerd ランタイムを起動するのに最小限必要な定義だけを置く。
+  "name": "ai-curator-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-08"
+}
