@@ -8,7 +8,7 @@
 - Worker 名: `ai-curator`（`src/index.ts`）
 - cron 1 本（`triggers.crons`）:
   - `0 21 * * *` — 日次パス（21:00 UTC = 朝 6 時 JST）。取得〜全件要約までを 1 実行で行う（`runDaily`）
-- バインディング: `AI`（Workers AI）/ `DB`（D1）/ `CONFIG`（KV）
+- バインディング: `AI`（Workers AI）/ `DB`（D1）。設定（関心軸・フィード）は D1 に置く（KV は使わない）
 - `observability.enabled: true`
 
 ---
@@ -40,7 +40,9 @@ npx wrangler d1 create ai-curator-db
 
 ### 2-2. マイグレーション適用
 
-`migrations/0001_init.sql`（articles / interest_axes / feedback / feed_entries / feed_trends）を適用する。
+`migrations/` 一式を適用する（`0001_init.sql` の articles / interest_axes / feedback /
+feed_entries / feed_trends に加え、`0005_promote_interest_axes_and_feeds.sql` で
+interest_axes を設定の源泉テーブルへ昇格し、フィードを保持する feed_source を作る）。
 
 ```bash
 # ローカル（wrangler dev 用の擬似 D1）
@@ -50,18 +52,13 @@ npx wrangler d1 migrations apply ai-curator-db --local
 npx wrangler d1 migrations apply ai-curator-db --remote
 ```
 
-### 2-3. KV Namespace 作成
-
-```bash
-npx wrangler kv namespace create CONFIG
-```
-
-出力される `id` を、`wrangler.jsonc` の `kv_namespaces[0].id`
-（現在 `REPLACE_WITH_KV_NAMESPACE_ID` プレースホルダ）に記入する。
-
-> **KV への初期投入コマンドは不要。** 関心軸・ソース（`interestAxes` / `sources`）は
-> デプロイ後にブラウザで `/settings` を開いて入力・保存する（§5-2）。scoring / embedding /
-> digest はコード内固定（`src/config.ts` の `SYSTEM_CONFIG`）なので KV には入れない。
+> **設定は D1 に置く（KV は使わない）。** 関心軸・ソース（`interestAxes` / `sources`）は
+> デプロイ後にブラウザで `/settings` を開いて入力・保存する（§5-2）。保存先は D1 の
+> `interest_axes`（源泉列 `axis_id`/`label`）と `feed_source`（`url`）。scoring / embedding /
+> digest はコード内固定（`src/config.ts` の `SYSTEM_CONFIG`）で、D1 にも KV にも入れない。
+>
+> 既存本番が旧構成（設定を KV `config:v1` に持つ）から移行する場合は、通常のデプロイの前に
+> §9「KV→D1 config 移行」を実施すること。
 
 ---
 
@@ -115,14 +112,14 @@ UI からは変更しない。デプロイ前に以下の手順で選定値へ�
 
 ### 5-2. 関心軸・ソースの投入（`/settings` で入力）
 
-関心軸（`interestAxes`）とソース（`sources`）は KV に置き、**設定画面から入力・保存する**。
+関心軸（`interestAxes`）とソース（`sources`）は D1 に置き、**設定画面から入力・保存する**。
 Access 保護（§4）が済んだら、ブラウザで `/settings` を開く。
 
-1. 初回は KV が空でも、既定値（`DEFAULT_USER_CONFIG`）が入った状態でフォームが開く。
-2. 関心軸（トピックの **label のみ**・追加/削除）とソース（**フィード URL リスト** /
-   GitHub リポジトリ / Hacker News 最低ポイント）を編集し、**保存**する。Worker が
-   `saveConfig`（`src/config.ts`）で KV キー `config:v1` に `interestAxes` / `sources` のみを
-   書き込む。関心記述文の手書きは不要（ベクトルは label から自動生成）。
+1. 初回は D1 に軸が 1 件も無くても、空のひな形（`EMPTY_USER_CONFIG`）でフォームが開く。
+2. 関心軸（トピックの **label のみ**・追加/削除）とソース（**フィード URL リスト**）を編集し、
+   **保存**する。Worker が `saveConfig`（`src/config.ts`）で D1 の `interest_axes`
+   （源泉列 `axis_id`/`label`）と `feed_source`（`url`）へ原子的に書き込む（`env.DB.batch`）。
+   関心記述文の手書きは不要（ベクトルは label から自動生成）。
 3. 以後の設定変更も同じく `/settings` から行う（設定変更の正の経路）。
 
 > 関心軸は **label（トピック名）だけ**入力する。関心記述文とベクトルは次回の日次パスが
@@ -213,3 +210,73 @@ GitHub リリースは `feedSummary` を持たず**タイトルのみ**でハッ
 - 要約はフィード全件に生成する（本文取得失敗時のみ NULL）。上位 N 件限定は廃止。
 - HN のリンク先本文は粗いタグ除去で取得するため、要約入力にヘッダ等のノイズが混じりうる（SPA/ペイウォール等では取得失敗しタイトルにフォールバック）。
 - フィードバック（`feedback` テーブル）は**収集のみ**。スコアリングへの学習利用は v2。
+
+---
+
+## 9. KV→D1 config 移行（既存本番の 1 回限りの移行手順）
+
+設定の保存先を KV（`config:v1` の JSON blob）から D1 の正規化テーブル
+（`interest_axes` の源泉列 `axis_id`/`label` と `feed_source`）へ移す。**新規デプロイには
+不要**（§2 の手順で D1 に直接投入する）。既に KV で稼働している本番だけがこの節を実施する。
+
+本番 KV の現行値は本番からしか取れないため、**以下の `--remote` / `kv` 操作はすべて
+デプロイ担当（本リポジトリのオーナー）が実行する**（本手順書の作業者は実行しない）。
+本番の KV namespace-id は旧 `wrangler.jsonc` の値 `04a1885ee0e1421d8ccce689acace6c9`
+（`CONFIG` バインディング）。
+
+### デプロイ順序（各段で可逆＝ロールバック可能）
+
+移行中は「旧コードは KV を読んで稼働したまま」を保ち、新コードへ切り替えるまで本番機能を
+止めない。各段の直後にロールバックする場合は、その段の変更を戻す（または旧バージョンを
+再デプロイする）だけでよい。KV の値は移行完了を確認するまで**削除しない**（最終的な退避先）。
+
+1. **migration 0005 を適用する。**
+   ```bash
+   npx wrangler d1 migrations apply ai-curator-db --remote
+   ```
+   これは列追加・新テーブル作成のみで既存データを壊さない。旧コード（KV 読取）は影響を
+   受けず稼働継続する。ロールバック不要（前方互換）。
+
+2. **KV の `config:v1` を読み、D1 へ投入する。**まず現行値を取得する。
+   ```bash
+   npx wrangler kv key get "config:v1" \
+     --namespace-id 04a1885ee0e1421d8ccce689acace6c9 --remote
+   ```
+   取得した JSON の `interestAxes[].{id,label}` と `sources.feeds[]` を D1 へ移す SQL を
+   用意し、`--file` で投入する（例。実際の id/label/url は取得値で置き換える）。
+   ```sql
+   -- interest_axes: label を源泉として reconcile する。embedding などの派生列は
+   -- 温存する（ON CONFLICT DO UPDATE SET label のみ）。既存行があれば label を更新し、
+   -- 無ければ源泉行を作る（派生列は NULL のまま → 次 cron が埋める）。
+   INSERT INTO interest_axes (axis_id, label) VALUES ('ai', 'AI')
+     ON CONFLICT(axis_id) DO UPDATE SET label = excluded.label;
+   -- feed_source: KV の feeds をそのまま 1 本 1 行で入れる。
+   INSERT INTO feed_source (url) VALUES ('https://martinfowler.com/feed.atom')
+     ON CONFLICT(url) DO NOTHING;
+   ```
+   ```bash
+   npx wrangler d1 execute ai-curator-db --remote --file=./migrate_config.sql
+   ```
+   この段でも本番はまだ旧コード（KV 読取）で稼働している。投入をやり直す場合は D1 の
+   `interest_axes`/`feed_source` を消して再投入すればよい（KV は無傷）。
+
+3. **新コードをデプロイする。**本 PR は D1 読み書きへの切替と `CONFIG`（KV）バインディング
+   除去を同時に含むため、このデプロイで設定の読取先が D1 に切り替わる。
+   ```bash
+   npx wrangler deploy
+   ```
+   > デプロイ前に §2 で D1（`interest_axes`/`feed_source`）へ設定が投入済みであることを
+   > 確認する。未投入だと新コードは軸 0 件で `loadConfig` が throw する（fail-fast）。
+   > 問題があれば旧バージョン（KV 読取・`CONFIG` バインディング付き）を再デプロイして
+   > ロールバックする。KV の値は残しているので旧コードはそのまま復旧する。
+
+4. **実エンドポイントで疎通確認する。**
+   - `GET /settings` — 移行した関心軸・フィードがフォームに表示される。
+   - `GET /` — フィードが表示される（当日フィードがあれば）。
+   - `POST /run` — 日次パスを起動し、`/runs/{id}` の status で完走を確認する。
+
+5. **KV を破棄する（任意・確認後）。**§4 の疎通と翌日フィードまで確認できたら、不要になった
+   KV namespace を削除してよい。急がず、しばらく退避先として残してもよい。
+   ```bash
+   npx wrangler kv namespace delete --namespace-id 04a1885ee0e1421d8ccce689acace6c9
+   ```
