@@ -12,6 +12,7 @@ interface EntryRow {
   published_at: string;
   url: string;
   hit_axis: string | null;
+  vote: string | null;
 }
 
 interface TrendRow {
@@ -104,6 +105,7 @@ function entryRow(over: Partial<EntryRow> = {}): EntryRow {
     published_at: "2026-07-08T00:00:00.000Z",
     url: "https://example.invalid/a",
     hit_axis: null,
+    vote: null,
     ...over,
   };
 }
@@ -223,6 +225,51 @@ describe("renderFeedPage", () => {
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<b>x</b>");
     expect(html).toContain("&lt;b&gt;");
+  });
+
+  describe("vote state", () => {
+    it("renders both votes unpressed when there is no stored vote", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: [entryRow({ rank: 1, feed_entry_id: 1, vote: null })],
+      });
+      const html = await (await renderFeedPage(env, 1)).text();
+      // 両ボタンとも未選択で描画される。
+      expect(html).toContain(
+        '<button data-entry-id="1" data-kind="up" aria-pressed="false"',
+      );
+      expect(html).toContain(
+        '<button data-entry-id="1" data-kind="down" aria-pressed="false"',
+      );
+    });
+
+    it("marks the up button pressed and the down button unpressed for an up vote", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: [entryRow({ rank: 1, feed_entry_id: 1, vote: "up" })],
+      });
+      const html = await (await renderFeedPage(env, 1)).text();
+      expect(html).toContain(
+        '<button data-entry-id="1" data-kind="up" aria-pressed="true"',
+      );
+      expect(html).toContain(
+        '<button data-entry-id="1" data-kind="down" aria-pressed="false"',
+      );
+    });
+
+    it("marks the down button pressed for a down vote", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: [entryRow({ rank: 1, feed_entry_id: 1, vote: "down" })],
+      });
+      const html = await (await renderFeedPage(env, 1)).text();
+      expect(html).toContain(
+        '<button data-entry-id="1" data-kind="down" aria-pressed="true"',
+      );
+      expect(html).toContain(
+        '<button data-entry-id="1" data-kind="up" aria-pressed="false"',
+      );
+    });
   });
 
   describe("pagination", () => {
