@@ -111,11 +111,21 @@ describe("DailyPass — source failure policy", () => {
 
 describe("DailyPass — load-config", () => {
   it("wraps a config load failure in NonRetryableError", async () => {
-    // runCallbacks=true → the load-config callback runs loadConfig against env.CONFIG,
-    // which returns null → loadConfig throws → wrapped as NonRetryableError.
-    const env = {
-      CONFIG: { get: vi.fn(async () => null) },
-    } as unknown as Env;
+    // runCallbacks=true → the load-config callback runs loadConfig against env.DB,
+    // which returns zero interest axes → loadConfig throws → wrapped as NonRetryableError.
+    const emptyDb = {
+      prepare() {
+        return {
+          bind() {
+            return this;
+          },
+          async all<T>() {
+            return { results: [] as T[], success: true, meta: {} };
+          },
+        };
+      },
+    };
+    const env = { DB: emptyDb } as unknown as Env;
     const step = makeStep({ runCallbacks: true });
     await expect(
       runDailyWorkflow(env, event(new Date("2026-07-08T21:00:00.000Z")), step as never),
@@ -129,7 +139,6 @@ describe("DailyPass — time source", () => {
     // date used for feed_entries/feed_trends. If run() used new Date() the date would
     // not match the (past) event timestamp.
     const eventTs = new Date("2026-07-08T21:00:00.000Z");
-    const config = configOutput([]);
     const labelHash = await sha256Hex("AI");
 
     const ops: { kind: string; args: unknown[] }[] = [];
@@ -155,6 +164,15 @@ describe("DailyPass — time source", () => {
                 ] as unknown as T[],
               };
             }
+            // loadConfig: axes(label 列) / feeds を D1 から読む。
+            if (s.includes("FROM interest_axes") && s.includes("label")) {
+              return {
+                results: [{ axis_id: "ai", label: "AI" }] as unknown as T[],
+              };
+            }
+            if (s.includes("FROM feed_source")) {
+              return { results: [] as T[] };
+            }
             return { results: [] as T[] };
           },
           async run() {
@@ -171,7 +189,6 @@ describe("DailyPass — time source", () => {
     const env = {
       DB: db,
       AI: { run: vi.fn() },
-      CONFIG: { get: vi.fn(async () => JSON.stringify(config)) },
     } as unknown as Env;
     const step = makeStep({ runCallbacks: true });
     await runDailyWorkflow(env, event(eventTs), step as never);

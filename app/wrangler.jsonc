@@ -27,11 +27,5 @@
       "database_name": "ai-curator-db",
       "database_id": "c051d5fa-0e99-4c6b-8961-d5d2c792f901"
     }
-  ],
-  "kv_namespaces": [
-    {
-      "binding": "CONFIG",
-      "id": "04a1885ee0e1421d8ccce689acace6c9"
-    }
   ]
 }

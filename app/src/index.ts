@@ -20,7 +20,6 @@ export { DailyPass };
 export interface Env {
   AI: Ai;
   DB: D1Database;
-  CONFIG: KVNamespace;
   /** 日次パスの Workflow（wrangler.jsonc の workflows binding）。 */
   DAILY_PASS: Workflow;
 }

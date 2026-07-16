@@ -1,5 +1,3 @@
-import type { Env } from "../index";
-
 /**
  * Embedding response from env.AI.run()
  * Reference: https://developers.cloudflare.com/workers-ai/models/bge-m3/
@@ -222,7 +220,12 @@ export async function generateAxisDescription(
  *   of the *label*). The digest model is NOT a rebuild trigger.
  * - If yes: expand the label into a description (LLM), embed the description, upsert.
  *
- * Delete any axes no longer in config.
+ * Axis deletion is NOT this function's responsibility: interest_axes is now the
+ * source of truth and /settings (saveConfig) owns removing rows for deleted axes.
+ * The cron only fills derived columns; it never deletes source rows. The existing
+ * query is therefore scoped to already-embedded rows (embedding IS NOT NULL): a
+ * source-only row (axis added via /settings, not yet embedded) is absent from the
+ * map, so `existing === null` drives axisNeedsUpdate to embed it.
  */
 export async function syncInterestAxes(
   db: D1Database,
@@ -233,7 +236,9 @@ export async function syncInterestAxes(
   sleep?: (ms: number) => Promise<void>
 ): Promise<void> {
   const existing = await db
-    .prepare("SELECT axis_id, seed_hash, embedding_model FROM interest_axes")
+    .prepare(
+      "SELECT axis_id, seed_hash, embedding_model FROM interest_axes WHERE embedding IS NOT NULL"
+    )
     .all();
 
   const existingMap = new Map(
@@ -283,16 +288,6 @@ export async function syncInterestAxes(
       `
         )
         .bind(axis.id, axis.label, newLabelHash, vectorJson, embeddingModel)
-        .run();
-    }
-  }
-
-  const configAxisIds = new Set(axes.map((a) => a.id));
-  for (const [axisId] of existingMap) {
-    if (!configAxisIds.has(axisId)) {
-      await db
-        .prepare("DELETE FROM interest_axes WHERE axis_id = ?")
-        .bind(axisId)
         .run();
     }
   }

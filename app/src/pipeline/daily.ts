@@ -108,7 +108,10 @@ const WORKING_SET_SQL =
   "SELECT id, title, source, url, published_at, embedding, embedding_model " +
   "FROM articles WHERE created_at >= datetime('now', '-1 day')";
 
-const AXES_SQL = "SELECT axis_id, embedding, embedding_model FROM interest_axes";
+// 昇格後は未 embed 軸が embedding=NULL の行として存在する。NULL を除外して引くことで
+// JSON.parse(r.embedding) の crash を避け、「未 embed 軸は採点対象外」の現行挙動を保つ。
+const AXES_SQL =
+  "SELECT axis_id, embedding, embedding_model FROM interest_axes WHERE embedding IS NOT NULL";
 
 /**
  * 過去のフィードに既出の記事 id（当日より前の feed_entries に載ったもの）。

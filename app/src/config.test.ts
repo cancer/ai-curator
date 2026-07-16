@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   loadConfig,
   saveConfig,
@@ -9,8 +9,10 @@ import {
 } from "./config";
 import type { Env } from "./index";
 
-// KV に置くのは interestAxes / sources のみ（ユーザー可変データ）。
-// 関心軸はラベルのみ（seedText は廃止）。sources は feeds のみ。
+// 設定は D1 の正規化テーブルに置く（KV blob は廃止）。
+// - interest_axes: 源泉列 axis_id/label（/settings が書く）＋
+//   派生列 seed_hash/embedding/embedding_model（cron が埋める）
+// - feed_source: url を 1 本 1 行
 const validUser: UserConfig = {
   interestAxes: [
     { id: "web-fw", label: "Web フレームワーク" },
@@ -21,15 +23,148 @@ const validUser: UserConfig = {
   },
 };
 
-function createMockEnv(): Env {
-  return {
-    AI: {} as any,
-    DB: {} as any,
-    CONFIG: {
-      get: vi.fn(),
-      put: vi.fn(),
-    } as any,
-  } as any;
+/** interest_axes 行（派生列は cron が埋めるので初期 null）。 */
+interface AxisRow {
+  axis_id: string;
+  label: string;
+  seed_hash: string | null;
+  embedding: string | null;
+  embedding_model: string | null;
+}
+
+/** 挿入順を表す連番 id（D1 の INTEGER PRIMARY KEY 相当）を内部で持つ。 */
+interface StoredAxisRow extends AxisRow {
+  id: number;
+}
+
+/** 発行 SQL の ORDER BY 列名を取り出す（無ければ null）。 */
+function orderByColumn(sql: string): string | null {
+  return sql.match(/ORDER BY (\w+)/i)?.[1] ?? null;
+}
+
+/**
+ * config.ts が使う D1 操作だけを実装する in-memory フェイク。
+ * - 読み取り: 発行された SQL の ORDER BY 列を解釈して整列する（正しい ORDER BY を
+ *   発行しているか＝本物の D1 での並びを担保するため。id=挿入順連番、axis_id/url=辞書順）。
+ * - 書き込み: saveConfig の batch（axis upsert / axis 除去 / feed 総入れ替え）を
+ *   実際に配列へ適用する。ON CONFLICT DO UPDATE SET label は label だけ更新し、
+ *   派生列（seed_hash/embedding/embedding_model）には触れない現行挙動を再現する。
+ * 返り値の axes/feeds 参照と、読み取りで発行された SQL 一覧(reads)を検証用に公開する。
+ */
+function makeDb(seed?: { axes?: AxisRow[]; feeds?: string[] }) {
+  let nextId = 1;
+  const axes: StoredAxisRow[] = (seed?.axes ?? []).map((a) => ({
+    id: nextId++,
+    ...a,
+  }));
+  // feed も挿入順連番 id を持つ（保存は毎回 delete→再 insert なので配列順＝id 順）。
+  let nextFeedId = 1;
+  const feeds: Array<{ id: number; url: string }> = (seed?.feeds ?? []).map(
+    (url) => ({ id: nextFeedId++, url }),
+  );
+  const reads: string[] = [];
+
+  function apply(sql: string, args: unknown[]): void {
+    if (/^INSERT INTO interest_axes/i.test(sql)) {
+      const [axisId, label] = args as [string, string];
+      const existing = axes.find((a) => a.axis_id === axisId);
+      if (existing) {
+        existing.label = label; // 派生列は据え置き（ON CONFLICT DO UPDATE SET label のみ）
+      } else {
+        axes.push({
+          id: nextId++,
+          axis_id: axisId,
+          label,
+          seed_hash: null,
+          embedding: null,
+          embedding_model: null,
+        });
+      }
+    } else if (/^DELETE FROM interest_axes WHERE axis_id NOT IN/i.test(sql)) {
+      const keep = new Set(args as string[]);
+      for (let i = axes.length - 1; i >= 0; i--) {
+        if (!keep.has(axes[i].axis_id)) axes.splice(i, 1);
+      }
+    } else if (/^DELETE FROM feed_source/i.test(sql)) {
+      feeds.length = 0;
+    } else if (/^INSERT INTO feed_source/i.test(sql)) {
+      feeds.push({ id: nextFeedId++, url: args[0] as string });
+    } else {
+      throw new Error(`unexpected write SQL: ${sql}`);
+    }
+  }
+
+  const db = {
+    prepare(rawSql: string) {
+      const sql = rawSql.replace(/\s+/g, " ").trim();
+      return {
+        sql,
+        args: [] as unknown[],
+        bind(...a: unknown[]) {
+          this.args = a;
+          return this;
+        },
+        async all<T>() {
+          reads.push(sql);
+          if (/FROM interest_axes/i.test(sql)) {
+            const col = orderByColumn(sql);
+            const rows = [...axes];
+            if (col === "id") rows.sort((a, b) => a.id - b.id);
+            else if (col === "axis_id")
+              rows.sort((a, b) => a.axis_id.localeCompare(b.axis_id));
+            return {
+              results: rows.map((a) => ({
+                axis_id: a.axis_id,
+                label: a.label,
+              })) as T[],
+              success: true,
+              meta: {},
+            };
+          }
+          if (/FROM feed_source/i.test(sql)) {
+            const col = orderByColumn(sql);
+            const rows = [...feeds];
+            if (col === "id") rows.sort((a, b) => a.id - b.id);
+            else if (col === "url")
+              rows.sort((a, b) => a.url.localeCompare(b.url));
+            return {
+              results: rows.map((r) => ({ url: r.url })) as T[],
+              success: true,
+              meta: {},
+            };
+          }
+          throw new Error(`unexpected read SQL: ${sql}`);
+        },
+        async run() {
+          apply(this.sql, this.args);
+          return { success: true, meta: { changes: 1 } };
+        },
+      };
+    },
+    async batch(stmts: Array<{ sql: string; args: unknown[] }>) {
+      for (const s of stmts) apply(s.sql, s.args);
+      return stmts.map(() => ({ success: true, meta: {} }));
+    },
+  };
+
+  return { db, axes, feeds, reads };
+}
+
+function makeEnv(seed?: { axes?: AxisRow[]; feeds?: string[] }) {
+  const { db, axes, feeds, reads } = makeDb(seed);
+  const env = { AI: {}, DB: db } as unknown as Env;
+  return { env, axes, feeds, reads };
+}
+
+/** validUser 相当の派生列付き axis 行（源泉＋派生が揃った状態）。 */
+function seededAxes(): AxisRow[] {
+  return validUser.interestAxes.map((a) => ({
+    axis_id: a.id,
+    label: a.label,
+    seed_hash: `hash-${a.id}`,
+    embedding: "[0.1,0.2]",
+    embedding_model: "@cf/baai/bge-m3",
+  }));
 }
 
 describe("config", () => {
@@ -41,30 +176,46 @@ describe("config", () => {
     expect(SYSTEM_CONFIG.digest.model).toBe("@cf/qwen/qwen3-30b-a3b-fp8");
   });
 
-describe("loadConfig", () => {
-    it("merges the KV UserConfig with SYSTEM_CONFIG into a full Config", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(
-        JSON.stringify(validUser),
-      );
+  describe("loadConfig", () => {
+    it("merges the D1 UserConfig with SYSTEM_CONFIG into a full Config", async () => {
+      const { env } = makeEnv({
+        axes: seededAxes(),
+        feeds: validUser.sources.feeds,
+      });
 
       const result = await loadConfig(env);
 
       expect(result).toEqual({ ...validUser, ...SYSTEM_CONFIG });
-      expect(env.CONFIG.get).toHaveBeenCalledWith("config:v1");
     });
 
-    it("ignores system fields present in the KV value and uses SYSTEM_CONFIG", async () => {
-      const env = createMockEnv();
-      const polluted = {
-        ...validUser,
-        scoring: { garbage: true },
-        embedding: { model: "x", maxInputChars: 1 },
-        digest: { model: "y", maxOutputTokens: 1 },
-      };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(
-        JSON.stringify(polluted),
-      );
+    it("reads axes and feeds via an id-ordered query (preserves insertion order)", async () => {
+      // seed の挿入順は axis_id / url の辞書順とは異なる（web-fw→ai、martinfowler→example）。
+      // フェイクは発行 SQL の ORDER BY 列で整列するので、id 以外で並べる/句を落とすと崩れる。
+      const { env, reads } = makeEnv({
+        axes: seededAxes(),
+        feeds: validUser.sources.feeds,
+      });
+
+      const result = await loadConfig(env);
+
+      // 返却順は挿入順（= id 昇順）。axis_id 辞書順なら [ai, web-fw] になり落ちる。
+      expect(result.interestAxes.map((a) => a.id)).toEqual(["web-fw", "ai"]);
+      // url 辞書順なら [example, martinfowler] になり落ちる。
+      expect(result.sources.feeds).toEqual(validUser.sources.feeds);
+      // 実装が id 昇順の ORDER BY を発行していること（句の削除・別列化を文字列でも捕捉）。
+      expect(
+        reads.some((s) => /FROM interest_axes .*ORDER BY id\b/i.test(s)),
+      ).toBe(true);
+      expect(
+        reads.some((s) => /FROM feed_source .*ORDER BY id\b/i.test(s)),
+      ).toBe(true);
+    });
+
+    it("exposes SYSTEM_CONFIG values (not stored in D1)", async () => {
+      const { env } = makeEnv({
+        axes: seededAxes(),
+        feeds: validUser.sources.feeds,
+      });
 
       const result = await loadConfig(env);
 
@@ -73,223 +224,150 @@ describe("loadConfig", () => {
       expect(result.digest).toEqual(SYSTEM_CONFIG.digest);
     });
 
-    it("throws when config key is not found", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(null);
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        'Config key "config:v1" not found in KV',
-      );
-    });
-
-    it("throws when JSON is invalid", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue("invalid json {");
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "Failed to parse config JSON",
-      );
-    });
-
-    it("throws when interestAxes is missing", async () => {
-      const env = createMockEnv();
-      const user = { ...validUser };
-      delete (user as any).interestAxes;
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "interestAxes must be an array",
-      );
-    });
-
-    it("throws when interestAxes is empty", async () => {
-      const env = createMockEnv();
-      const user = { ...validUser, interestAxes: [] };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
+    it("throws when there are no interest axes (fail-fast)", async () => {
+      const { env } = makeEnv({ axes: [], feeds: [] });
 
       await expect(loadConfig(env)).rejects.toThrow(
         "interestAxes must not be empty",
       );
     });
+  });
 
-    it("throws when an interestAxis has an empty id", async () => {
-      const env = createMockEnv();
-      const user = {
-        ...validUser,
-        interestAxes: [{ id: "", label: "Web FW" }],
-      };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
+  describe("saveConfig", () => {
+    it("round-trips axes and feeds (saveConfig then loadConfig)", async () => {
+      const { env } = makeEnv();
 
-      await expect(loadConfig(env)).rejects.toThrow(
-        "InterestAxis.id must be a non-empty string",
-      );
+      await saveConfig(env, validUser);
+      const result = await loadConfig(env);
+
+      expect(result.interestAxes).toEqual(validUser.interestAxes);
+      expect(result.sources.feeds).toEqual(validUser.sources.feeds);
     });
 
-    it("throws when an interestAxis has an empty label", async () => {
-      const env = createMockEnv();
-      const user = {
+    it("does not overwrite derived columns (embedding/seed_hash/model) on label change", async () => {
+      const { env, axes } = makeEnv({
+        axes: seededAxes(),
+        feeds: validUser.sources.feeds,
+      });
+
+      const renamed: UserConfig = {
+        interestAxes: [
+          { id: "web-fw", label: "Web フレームワーク（改）" },
+          { id: "ai", label: "AI" },
+        ],
+        sources: validUser.sources,
+      };
+      await saveConfig(env, renamed);
+
+      const webFw = axes.find((a) => a.axis_id === "web-fw")!;
+      expect(webFw.label).toBe("Web フレームワーク（改）");
+      // 派生列は cron の責務なので saveConfig は触らない（次 cron が hash 不一致で再 embed）。
+      expect(webFw.seed_hash).toBe("hash-web-fw");
+      expect(webFw.embedding).toBe("[0.1,0.2]");
+      expect(webFw.embedding_model).toBe("@cf/baai/bge-m3");
+    });
+
+    it("removes axes that are no longer in the config", async () => {
+      const { env, axes } = makeEnv({
+        axes: seededAxes(),
+        feeds: validUser.sources.feeds,
+      });
+
+      const dropped: UserConfig = {
+        interestAxes: [{ id: "ai", label: "AI" }],
+        sources: validUser.sources,
+      };
+      await saveConfig(env, dropped);
+
+      expect(axes.map((a) => a.axis_id)).toEqual(["ai"]);
+    });
+
+    it("replaces feeds wholesale", async () => {
+      const { env, feeds } = makeEnv({
+        axes: seededAxes(),
+        feeds: ["https://old.example/rss"],
+      });
+
+      const updated: UserConfig = {
+        interestAxes: validUser.interestAxes,
+        sources: { feeds: ["https://new.example/a", "https://new.example/b"] },
+      };
+      await saveConfig(env, updated);
+
+      expect(feeds.map((f) => f.url)).toEqual([
+        "https://new.example/a",
+        "https://new.example/b",
+      ]);
+    });
+
+    it("throws and writes nothing when a label is empty", async () => {
+      const { env, axes } = makeEnv();
+      const invalid = {
         ...validUser,
         interestAxes: [{ id: "web-fw", label: "" }],
       };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
-      await expect(loadConfig(env)).rejects.toThrow(
+      await expect(saveConfig(env, invalid as UserConfig)).rejects.toThrow(
         "InterestAxis.label must be a non-empty string",
       );
+      expect(axes).toEqual([]);
     });
 
-    it("throws when interestAxes has duplicate ids", async () => {
-      const env = createMockEnv();
-      const user = {
+    it("throws and writes nothing when a feed URL is invalid", async () => {
+      const { env, feeds } = makeEnv();
+      const invalid: UserConfig = {
+        ...validUser,
+        sources: { feeds: ["not a url"] },
+      };
+
+      await expect(saveConfig(env, invalid)).rejects.toThrow(
+        "sources.feeds entries must be http(s):// URLs",
+      );
+      expect(feeds).toEqual([]);
+    });
+
+    it("throws on duplicate axis ids", async () => {
+      const { env } = makeEnv();
+      const dup: UserConfig = {
         ...validUser,
         interestAxes: [
           { id: "dup", label: "A" },
           { id: "dup", label: "B" },
         ],
       };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
 
-      await expect(loadConfig(env)).rejects.toThrow(
+      await expect(saveConfig(env, dup)).rejects.toThrow(
         'Duplicate interestAxis id: "dup"',
       );
     });
 
-    it("throws when sources is missing", async () => {
-      const env = createMockEnv();
-      const user = { ...validUser };
-      delete (user as any).sources;
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow("sources must be an object");
-    });
-
-    it("throws when sources.feeds is not an array", async () => {
-      const env = createMockEnv();
-      const user = {
-        ...validUser,
-        sources: { ...validUser.sources, feeds: "not-array" },
-      };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.feeds must be an array",
-      );
-    });
-
-    it("throws when feeds has a non-URL entry", async () => {
-      const env = createMockEnv();
-      const user = {
-        ...validUser,
-        sources: {
-          ...validUser.sources,
-          feeds: ["https://ok.example/rss", "not a url"],
-        },
-      };
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(JSON.stringify(user));
-
-      await expect(loadConfig(env)).rejects.toThrow(
-        "sources.feeds entries must be http(s):// URLs",
-      );
-    });
-
-  });
-
-  describe("saveConfig", () => {
-    it("writes only interestAxes and sources to KV", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.put as any).mockResolvedValue(undefined);
-
-      await saveConfig(env, validUser);
-
-      expect(env.CONFIG.put).toHaveBeenCalledWith(
-        "config:v1",
-        JSON.stringify(validUser),
-      );
-    });
-
-    it("never persists system fields even if present on the argument", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.put as any).mockResolvedValue(undefined);
-
-      const polluted = {
-        ...validUser,
-        scoring: { anything: true },
-        digest: { model: "z", maxOutputTokens: 1 },
-      };
-
-      await saveConfig(env, polluted as any);
-
-      const [, written] = vi.mocked(env.CONFIG.put as any).mock.calls[0];
-      const parsed = JSON.parse(written as string);
-      expect(Object.keys(parsed).sort()).toEqual(["interestAxes", "sources"]);
-    });
-
-    it("throws validation error and does not write when UserConfig is invalid", async () => {
-      const env = createMockEnv();
-      const invalid = {
-        ...validUser,
-        interestAxes: [{ id: "web-fw", label: "" }],
-      };
-
-      await expect(saveConfig(env, invalid as any)).rejects.toThrow(
-        "InterestAxis.label must be a non-empty string",
-      );
-      expect(env.CONFIG.put).not.toHaveBeenCalled();
-    });
-
-    it("accepts empty source lists", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.put as any).mockResolvedValue(undefined);
-
+    it("accepts empty feed list", async () => {
+      const { env, feeds } = makeEnv();
       const user: UserConfig = {
-        ...validUser,
-        sources: {
-          ...validUser.sources,
-          feeds: [],
-        },
+        interestAxes: validUser.interestAxes,
+        sources: { feeds: [] },
       };
 
       await saveConfig(env, user);
 
-      expect(env.CONFIG.put).toHaveBeenCalled();
+      expect(feeds).toEqual([]);
     });
   });
 
   describe("loadUserConfigForForm", () => {
-    it("returns the KV UserConfig when present and valid", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(
-        JSON.stringify(validUser),
-      );
+    it("returns the D1 UserConfig when axes exist", async () => {
+      const { env } = makeEnv({
+        axes: seededAxes(),
+        feeds: validUser.sources.feeds,
+      });
 
       const result = await loadUserConfigForForm(env);
 
       expect(result).toEqual(validUser);
     });
 
-    it("returns EMPTY_USER_CONFIG when KV is empty (does not throw)", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(null);
-
-      const result = await loadUserConfigForForm(env);
-
-      expect(result).toEqual(EMPTY_USER_CONFIG);
-    });
-
-    it("returns EMPTY_USER_CONFIG when KV JSON is invalid (does not throw)", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue("broken {");
-
-      const result = await loadUserConfigForForm(env);
-
-      expect(result).toEqual(EMPTY_USER_CONFIG);
-    });
-
-    it("returns EMPTY_USER_CONFIG when KV value fails validation (does not throw)", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.get as any).mockResolvedValue(
-        JSON.stringify({ ...validUser, interestAxes: [] }),
-      );
+    it("returns EMPTY_USER_CONFIG when there are no axes (does not throw)", async () => {
+      const { env } = makeEnv({ axes: [], feeds: [] });
 
       const result = await loadUserConfigForForm(env);
 
@@ -304,8 +382,7 @@ describe("loadConfig", () => {
     });
 
     it("is not directly saveable (no interest axis)", async () => {
-      const env = createMockEnv();
-      vi.mocked(env.CONFIG.put as any).mockResolvedValue(undefined);
+      const { env } = makeEnv();
 
       await expect(saveConfig(env, EMPTY_USER_CONFIG)).rejects.toThrow(
         "interestAxes must not be empty",
