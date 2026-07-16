@@ -14,6 +14,14 @@ import { decodeSummary, SUMMARY_SECTIONS } from "../lib/summarize";
 
 const PAGE_SIZE = 20;
 
+/**
+ * カテゴリフィルタの「未分類」を表す予約センチネル（`?category=` の値）。
+ * category は自由入力なので理論上衝突しうるが、単一オーナー運用のため許容する
+ * （この値と同名のカテゴリを作ると 未分類 ビューに隠れる、という限定）。
+ * null/空文字は「すべて」（フィルタ無し）で、これとは別。
+ */
+export const UNCATEGORIZED = "__uncategorized__";
+
 const MAX_DATE_SQL = "SELECT MAX(date) AS date FROM feed_entries";
 
 const TRENDS_SQL =
@@ -34,6 +42,56 @@ const ENTRIES_SQL =
 // その日の総件数。総ページ数・現在位置・前後リンクの有無を決めるのに使う。
 const COUNT_SQL =
   "SELECT COUNT(*) AS total FROM feed_entries WHERE date = ?";
+
+// カテゴリ指定時の JOIN 版。hit_axis→interest_axes を LEFT JOIN して category を引く。
+// ENTRIES と COUNT に同一の FROM/JOIN/WHERE 述語を適用する — 不一致は offset 破綻・
+// 空ページの原因になる（最重要）。列は非フィルタ版と同一（EntryRow を満たす）。
+const ENTRIES_SQL_FILTERED_HEAD =
+  "SELECT fe.id AS feed_entry_id, fe.rank AS rank, s.text AS summary, " +
+  "a.title AS title, a.source AS source, a.published_at AS published_at, " +
+  "a.url AS url, a.hit_axis AS hit_axis, av.vote AS vote " +
+  "FROM feed_entries fe JOIN articles a ON a.id = fe.article_id " +
+  "LEFT JOIN interest_axes ax ON ax.axis_id = a.hit_axis " +
+  "LEFT JOIN summaries s ON s.article_id = fe.article_id " +
+  "LEFT JOIN article_vote av ON av.article_id = fe.article_id " +
+  "WHERE fe.date = ? ";
+const ENTRIES_SQL_FILTERED_TAIL = " ORDER BY fe.rank LIMIT ? OFFSET ?";
+
+const COUNT_SQL_FILTERED_HEAD =
+  "SELECT COUNT(*) AS total FROM feed_entries fe " +
+  "JOIN articles a ON a.id = fe.article_id " +
+  "LEFT JOIN interest_axes ax ON ax.axis_id = a.hit_axis " +
+  "WHERE fe.date = ? ";
+
+const TRENDS_SQL_FILTERED_HEAD =
+  "SELECT ft.axis_id AS axis_id, ft.hit_count AS hit_count, " +
+  "ft.narrative AS narrative FROM feed_trends ft " +
+  "LEFT JOIN interest_axes ax ON ax.axis_id = ft.axis_id " +
+  "WHERE ft.date = ? ";
+const TRENDS_SQL_FILTERED_TAIL = " ORDER BY ft.hit_count DESC";
+
+/** フィルタのモード。named はカテゴリ名で、uncat は未分類（category IS NULL）で絞る。 */
+type CategoryFilter =
+  | { mode: "all" }
+  | { mode: "named"; category: string }
+  | { mode: "uncat" };
+
+/**
+ * `?category` の生値をフィルタへ解釈する。null/空文字は「すべて」（現行挙動）、
+ * センチネルは「未分類」、それ以外はカテゴリ名として扱う。
+ */
+function parseCategoryFilter(category: string | null): CategoryFilter {
+  if (category === null || category === "") return { mode: "all" };
+  if (category === UNCATEGORIZED) return { mode: "uncat" };
+  return { mode: "named", category };
+}
+
+/** カテゴリ絞り込みの WHERE 追加述語（entries 用。trends は hit_axis 列が無いので別）。 */
+function entriesPredicate(filter: CategoryFilter): string {
+  return filter.mode === "named"
+    ? "AND ax.category = ?"
+    : "AND (a.hit_axis IS NULL OR ax.category IS NULL)";
+}
 
 interface EntryRow {
   feed_entry_id: number;
@@ -165,17 +223,58 @@ function renderPagination(
   current: number,
   totalPages: number,
   total: number,
+  pageHref: (page: number) => string,
 ): string {
   const prev =
     current > 1
-      ? `<a href="/?page=${current - 1}">前へ</a>`
+      ? `<a href="${pageHref(current - 1)}">前へ</a>`
       : `<span class="disabled">前へ</span>`;
   const next =
     current < totalPages
-      ? `<a href="/?page=${current + 1}">次へ</a>`
+      ? `<a href="${pageHref(current + 1)}">次へ</a>`
       : `<span class="disabled">次へ</span>`;
   const status = `<span class="meta">${current} / ${totalPages}（全${total}件）</span>`;
   return `<nav class="pagination">${prev} ${status} ${next}</nav>`;
+}
+
+/**
+ * カテゴリ切替ナビ。[すべて]・各カテゴリ(distinct)・[未分類] を素のリンクで並べ、
+ * 現在の選択だけはリンクにせず `<strong>` で現在地を示す（JS 不要）。
+ * href の値は encodeURIComponent、表示ラベルは escapeHtml でエスケープする。
+ */
+function renderCategoryNav(
+  categories: string[],
+  filter: CategoryFilter,
+): string {
+  const item = (label: string, href: string, active: boolean): string =>
+    active
+      ? `<strong>${escapeHtml(label)}</strong>`
+      : `<a href="${href}">${escapeHtml(label)}</a>`;
+
+  const parts = [item("すべて", "/", filter.mode === "all")];
+  for (const c of categories) {
+    parts.push(
+      item(
+        c,
+        `/?category=${encodeURIComponent(c)}`,
+        filter.mode === "named" && filter.category === c,
+      ),
+    );
+  }
+  parts.push(
+    item("未分類", `/?category=${UNCATEGORIZED}`, filter.mode === "uncat"),
+  );
+  return `<nav class="categories">${parts.join(" ")}</nav>`;
+}
+
+/** ページネーション/ナビ用に現在のカテゴリを保持する page href を作る。 */
+function pageHrefFor(filter: CategoryFilter): (page: number) => string {
+  if (filter.mode === "all") return (p) => `/?page=${p}`;
+  if (filter.mode === "named") {
+    const c = encodeURIComponent(filter.category);
+    return (p) => `/?category=${c}&page=${p}`;
+  }
+  return (p) => `/?category=${UNCATEGORIZED}&page=${p}`;
 }
 
 /**
@@ -195,10 +294,15 @@ function voteButton(
   );
 }
 
-/** 最新フィードを 1 ページ分レンダリングする。page は範囲外を 1..総ページ数 に丸める。 */
+/**
+ * 最新フィードを 1 ページ分レンダリングする。page は範囲外を 1..総ページ数 に丸める。
+ * `category` は `?category` の生値: null/空は「すべて」（現行 SQL を変えない）、
+ * センチネルは「未分類」、それ以外はカテゴリ名で単一選択フィルタする。
+ */
 export async function renderFeedPage(
   env: Env,
   pageNumber: number,
+  category: string | null = null,
 ): Promise<Response> {
   const latest = await env.DB.prepare(MAX_DATE_SQL).first<{
     date: string | null;
@@ -213,11 +317,21 @@ export async function renderFeedPage(
 
   const config = await loadConfig(env);
   const labels = new Map(config.interestAxes.map((a) => [a.id, a.label]));
+  // ナビ用のカテゴリ集合（distinct）。追加クエリ不要で loadConfig から取る。
+  const categories = [
+    ...new Set(
+      config.interestAxes
+        .map((a) => a.category)
+        .filter((c): c is string => c != null && c !== ""),
+    ),
+  ];
+
+  const filter = parseCategoryFilter(category);
 
   const trendRows =
-    (await env.DB.prepare(TRENDS_SQL).bind(date).all<TrendRow>()).results ?? [];
+    (await buildTrendsStmt(env, date, filter).all<TrendRow>()).results ?? [];
 
-  const countRow = await env.DB.prepare(COUNT_SQL).bind(date).first<{
+  const countRow = await buildCountStmt(env, date, filter).first<{
     total: number;
   }>();
   const total = countRow?.total ?? 0;
@@ -230,9 +344,7 @@ export async function renderFeedPage(
   const offset = (current - 1) * PAGE_SIZE;
   const entries =
     (
-      await env.DB.prepare(ENTRIES_SQL)
-        .bind(date, PAGE_SIZE, offset)
-        .all<EntryRow>()
+      await buildEntriesStmt(env, date, filter, offset).all<EntryRow>()
     ).results ?? [];
 
   const list = entries.map((e) => renderEntry(e, labels)).join("");
@@ -240,11 +352,64 @@ export async function renderFeedPage(
   const body =
     `<h1>フィード <span class="meta">${escapeHtml(date)}</span></h1>` +
     `<p><a href="/settings">設定</a></p>` +
+    renderCategoryNav(categories, filter) +
     renderTrends(trendRows, labels) +
     `<h2>記事</h2><ul class="entries">${list}</ul>` +
-    renderPagination(current, totalPages, total) +
+    renderPagination(current, totalPages, total, pageHrefFor(filter)) +
     `<style>${FEEDBACK_STYLE}</style>` +
     `<script>${FEEDBACK_SCRIPT}</script>`;
 
   return htmlResponse(page("フィード", body));
+}
+
+/** entries クエリを組む。all は現行 SQL のまま、フィルタ時のみ JOIN 版に分岐する。 */
+function buildEntriesStmt(
+  env: Env,
+  date: string,
+  filter: CategoryFilter,
+  offset: number,
+): D1PreparedStatement {
+  if (filter.mode === "all") {
+    return env.DB.prepare(ENTRIES_SQL).bind(date, PAGE_SIZE, offset);
+  }
+  const sql =
+    ENTRIES_SQL_FILTERED_HEAD +
+    entriesPredicate(filter) +
+    ENTRIES_SQL_FILTERED_TAIL;
+  return filter.mode === "named"
+    ? env.DB.prepare(sql).bind(date, filter.category, PAGE_SIZE, offset)
+    : env.DB.prepare(sql).bind(date, PAGE_SIZE, offset);
+}
+
+/** COUNT クエリを組む。entries と同一の JOIN/WHERE 述語で数える（offset 整合の要）。 */
+function buildCountStmt(
+  env: Env,
+  date: string,
+  filter: CategoryFilter,
+): D1PreparedStatement {
+  if (filter.mode === "all") {
+    return env.DB.prepare(COUNT_SQL).bind(date);
+  }
+  const sql = COUNT_SQL_FILTERED_HEAD + entriesPredicate(filter);
+  return filter.mode === "named"
+    ? env.DB.prepare(sql).bind(date, filter.category)
+    : env.DB.prepare(sql).bind(date);
+}
+
+/** trends クエリを組む。フィルタ時は feed_trends を軸の category で絞る。 */
+function buildTrendsStmt(
+  env: Env,
+  date: string,
+  filter: CategoryFilter,
+): D1PreparedStatement {
+  if (filter.mode === "all") {
+    return env.DB.prepare(TRENDS_SQL).bind(date);
+  }
+  const predicate =
+    filter.mode === "named" ? "AND ax.category = ?" : "AND ax.category IS NULL";
+  const sql =
+    TRENDS_SQL_FILTERED_HEAD + predicate + TRENDS_SQL_FILTERED_TAIL;
+  return filter.mode === "named"
+    ? env.DB.prepare(sql).bind(date, filter.category)
+    : env.DB.prepare(sql).bind(date);
 }
