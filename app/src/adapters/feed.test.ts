@@ -97,6 +97,73 @@ describe("parseFeed", () => {
   });
 });
 
+const RSS_PDF = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Feed with PDFs</title>
+    <item>
+      <title>HTML article</title>
+      <link>https://blog.example/article</link>
+      <pubDate>Tue, 08 Jul 2026 00:00:00 GMT</pubDate>
+      <description>&lt;p&gt;Snippet.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <title>PDF by link extension</title>
+      <link>https://blog.example/paper.pdf</link>
+      <pubDate>Tue, 08 Jul 2026 01:00:00 GMT</pubDate>
+      <description>&lt;p&gt;Snippet.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <title>PDF by link extension with query/fragment</title>
+      <link>https://blog.example/report.pdf?v=2#page=3</link>
+      <pubDate>Tue, 08 Jul 2026 02:00:00 GMT</pubDate>
+      <description>&lt;p&gt;Snippet.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <title>PDF by enclosure type</title>
+      <link>https://blog.example/download</link>
+      <pubDate>Tue, 08 Jul 2026 03:00:00 GMT</pubDate>
+      <description>&lt;p&gt;Snippet.&lt;/p&gt;</description>
+      <enclosure url="https://blog.example/download" type="application/pdf" length="1000"/>
+    </item>
+  </channel>
+</rss>`;
+
+const ATOM_PDF = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom with PDFs</title>
+  <entry>
+    <title>HTML entry</title>
+    <link rel="alternate" href="https://site.example/post"/>
+    <updated>2026-07-08T00:00:00Z</updated>
+    <summary>Snippet.</summary>
+  </entry>
+  <entry>
+    <title>PDF entry by href</title>
+    <link rel="alternate" href="https://site.example/paper.pdf"/>
+    <updated>2026-07-08T01:00:00Z</updated>
+    <summary>Snippet.</summary>
+  </entry>
+  <entry>
+    <title>PDF entry by link type</title>
+    <link rel="alternate" type="application/pdf" href="https://site.example/download"/>
+    <updated>2026-07-08T02:00:00Z</updated>
+    <summary>Snippet.</summary>
+  </entry>
+</feed>`;
+
+describe("parseFeed: PDF exclusion", () => {
+  it("excludes RSS items that are PDFs (link extension, query/fragment, enclosure type)", async () => {
+    const articles = await parseFeed(RSS_PDF, "https://blog.example/feed");
+    expect(articles.map((a) => a.title)).toEqual(["HTML article"]);
+  });
+
+  it("excludes Atom entries that are PDFs (href extension, link type)", async () => {
+    const articles = await parseFeed(ATOM_PDF, "https://site.example/atom");
+    expect(articles.map((a) => a.title)).toEqual(["HTML entry"]);
+  });
+});
+
 describe("selectHref", () => {
   it("prefers rel=alternate, falls back to first link", () => {
     expect(

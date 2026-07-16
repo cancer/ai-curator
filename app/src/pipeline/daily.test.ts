@@ -581,6 +581,7 @@ function makeReadDb(reads: {
   axes?: AxisRow[];
   entries?: EntryRow[];
   trendRows?: TrendRow[];
+  priorFeedArticleIds?: number[];
 }) {
   const ops: Op[] = [];
   const db = {
@@ -607,6 +608,12 @@ function makeReadDb(reads: {
           }
           if (s.includes("FROM interest_axes")) {
             return { results: (reads.axes ?? []) as unknown as T[] };
+          }
+          if (s.includes("DISTINCT article_id FROM feed_entries")) {
+            const rows = (reads.priorFeedArticleIds ?? []).map((id) => ({
+              article_id: id,
+            }));
+            return { results: rows as unknown as T[] };
           }
           if (s.includes("FROM articles")) {
             return { results: (reads.workingSet ?? []) as unknown as T[] };
@@ -727,6 +734,40 @@ describe("scoreAndBuildFeed", () => {
 
     expect(ops.filter((o) => o.kind === "insert-entry")).toHaveLength(1);
     expect(result).toMatchObject({ candidates: 1, excludedFromFeed: 2 });
+  });
+
+  it("excludes articles already surfaced in a prior day's feed (#12)", async () => {
+    const workingSet = [
+      workingRow({
+        id: 1,
+        url: "u1",
+        embedding: "[1,0,0]",
+        embedding_model: "m",
+      }),
+      workingRow({
+        id: 2,
+        url: "u2",
+        embedding: "[0,1,0]",
+        embedding_model: "m",
+      }),
+    ];
+    const { db, ops } = makeReadDb({
+      workingSet,
+      axes: [],
+      priorFeedArticleIds: [1],
+    });
+
+    const result = await scoreAndBuildFeed(
+      db,
+      SCORING,
+      "m",
+      new Date("2026-07-08T21:00:00.000Z"),
+    );
+
+    const feedInserts = ops.filter((o) => o.kind === "insert-entry");
+    expect(feedInserts).toHaveLength(1);
+    expect(feedInserts[0].args[1]).toBe(2);
+    expect(result).toMatchObject({ candidates: 1, feedEntries: 1 });
   });
 });
 
