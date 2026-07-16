@@ -42,7 +42,7 @@ function makeEnv() {
       status: async () => ({ status: "running", output: null }),
     }),
   };
-  const env = { DB: db, AI: {}, CONFIG: {}, DAILY_PASS } as unknown as Env;
+  const env = { DB: db, AI: {}, DAILY_PASS } as unknown as Env;
   return { env, inserts, created };
 }
 

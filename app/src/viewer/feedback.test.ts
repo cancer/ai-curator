@@ -58,7 +58,7 @@ function makeEnv(entries: FeedEntryRow[]) {
       };
     },
   };
-  const env = { DB: db, AI: {}, CONFIG: {} } as unknown as Env;
+  const env = { DB: db, AI: {} } as unknown as Env;
   return { env, inserts, votes };
 }
 
