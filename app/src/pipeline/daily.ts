@@ -111,6 +111,14 @@ const WORKING_SET_SQL =
 const AXES_SQL = "SELECT axis_id, embedding, embedding_model FROM interest_axes";
 
 /**
+ * 過去のフィードに既出の記事 id（当日より前の feed_entries に載ったもの）。
+ * 作業集合は「直近 24h に取り込まれた記事」なので、日跨ぎでウィンドウが重なると前日出た
+ * 記事が翌日も候補に残り再掲される。既出分を候補から除外して二度と載せない（issue #12）。
+ */
+const PRIOR_FEED_ARTICLES_SQL =
+  "SELECT DISTINCT article_id FROM feed_entries WHERE date < ?";
+
+/**
  * 当日掲載のうち summaries に行が無いエントリ（要約段の対象。title/source/url はメタで
  * 永続済み）。summaries を LEFT JOIN して s.article_id IS NULL に絞るのは、step 再実行時に
  * 要約済みを飛ばして未了分だけ進めるため（ingest の embedding=NULL のみ処理と同じ設計思想）。
@@ -396,7 +404,18 @@ export async function scoreAndBuildFeed(
   const rows =
     (await db.prepare(WORKING_SET_SQL).all<ArticleRow>()).results ?? [];
 
-  // フィード構築対象は embedding を持ち現行モデルで生成された記事のみ。
+  // 既出（過去のフィードに載った）記事は再掲しない（issue #12）。
+  const date = runAt.toISOString().slice(0, 10);
+  const priorRows =
+    (
+      await db
+        .prepare(PRIOR_FEED_ARTICLES_SQL)
+        .bind(date)
+        .all<{ article_id: number }>()
+    ).results ?? [];
+  const priorSet = new Set(priorRows.map((r) => r.article_id));
+
+  // フィード構築対象は embedding を持ち現行モデルで生成され、かつ未既出の記事のみ。
   interface Candidate {
     id: number;
     source: string;
@@ -407,7 +426,10 @@ export async function scoreAndBuildFeed(
   }
   const candidates: Candidate[] = rows
     .filter(
-      (r) => r.embedding !== null && r.embedding_model === embeddingModel,
+      (r) =>
+        r.embedding !== null &&
+        r.embedding_model === embeddingModel &&
+        !priorSet.has(r.id),
     )
     .map((r) => ({
       id: r.id,
@@ -472,8 +494,8 @@ export async function scoreAndBuildFeed(
   }
 
   // feed_entries: スコア降順に rank 1..N。当日分を delete してから insert。
+  // date は候補選定時に算出済み（既出除外と同じ日付を使う）。
   const ranked = [...scored].sort((a, b) => b.score - a.score);
-  const date = runAt.toISOString().slice(0, 10);
 
   await db.prepare("DELETE FROM feed_entries WHERE date = ?").bind(date).run();
   for (let i = 0; i < ranked.length; i++) {
