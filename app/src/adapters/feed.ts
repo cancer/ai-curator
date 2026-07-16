@@ -37,6 +37,12 @@ const BODY_EXCLUDE = ["nav", "footer", "aside", "header"];
 interface AtomLink {
   "@_href": string;
   "@_rel"?: string;
+  "@_type"?: string;
+}
+
+interface RssEnclosure {
+  "@_url"?: string;
+  "@_type"?: string;
 }
 
 interface AtomText {
@@ -49,6 +55,7 @@ interface RssItem {
   pubDate?: string;
   description?: string;
   "content:encoded"?: string;
+  enclosure?: RssEnclosure | RssEnclosure[];
 }
 
 interface AtomEntry {
@@ -76,6 +83,47 @@ export function selectHref(link: AtomLink | AtomLink[] | undefined): string {
   }
   const alternate = links.find((l) => l["@_rel"] === "alternate");
   return (alternate ?? links[0])["@_href"];
+}
+
+const PDF_CONTENT_TYPE = "application/pdf";
+
+/**
+ * URL のパスが `.pdf` で終わるか。クエリ・フラグメントは URL パースで path から
+ * 除かれるので考慮不要。パース不能な URL は PDF ではないとみなす（false）。
+ */
+export function isPdfUrl(rawUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  return url.pathname.toLowerCase().endsWith(".pdf");
+}
+
+/** RSS item が PDF か。link 拡張子・enclosure（url 拡張子 or type）で判定する。 */
+function isRssItemPdf(item: RssItem): boolean {
+  if (isPdfUrl(String(item.link ?? ""))) {
+    return true;
+  }
+  return ensureArray<RssEnclosure>(item.enclosure).some(
+    (enc) =>
+      enc["@_type"] === PDF_CONTENT_TYPE || isPdfUrl(String(enc["@_url"] ?? "")),
+  );
+}
+
+/** Atom entry が PDF か。記事リンク（selectHref と同じ選択）の href 拡張子・type で判定する。 */
+function isAtomEntryPdf(entry: AtomEntry): boolean {
+  const links = ensureArray<AtomLink>(entry.link);
+  const alternate = links.find((l) => l["@_rel"] === "alternate");
+  const selected = alternate ?? links[0];
+  if (selected === undefined) {
+    return false;
+  }
+  return (
+    selected["@_type"] === PDF_CONTENT_TYPE ||
+    isPdfUrl(selected["@_href"] ?? "")
+  );
 }
 
 /**
@@ -117,8 +165,11 @@ async function parseRss(
   const items = ensureArray<RssItem>(
     (channel as { item?: RssItem | RssItem[] })?.item,
   );
+  // PDF は本文抽出・要約の対象にならないので取り込み段で除外する（issue #10）。
   return Promise.all(
-    items.map((item) => {
+    items
+      .filter((item) => !isRssItemPdf(item))
+      .map((item) => {
       const encoded = item["content:encoded"];
       const description = item.description;
       // content:encoded が無ければ description をインライン全文候補とはしない
@@ -140,8 +191,11 @@ async function parseAtom(
   feedUrl: string,
 ): Promise<NormalizedArticle[]> {
   const entries = ensureArray<AtomEntry>(feed?.entry);
+  // PDF は本文抽出・要約の対象にならないので取り込み段で除外する（issue #10）。
   return Promise.all(
-    entries.map((entry) => {
+    entries
+      .filter((entry) => !isAtomEntryPdf(entry))
+      .map((entry) => {
       const content = textOf(entry.content) || undefined;
       const summary = textOf(entry.summary) || undefined;
       return normalize({
