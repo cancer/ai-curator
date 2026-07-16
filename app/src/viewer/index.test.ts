@@ -77,6 +77,18 @@ function makeEnv(opts: {
             );
             return { results: sorted as unknown as T[], success: true, meta: {} };
           }
+          // loadConfig: 設定は D1 の interest_axes / feed_source から読む。
+          if (s.includes("FROM interest_axes")) {
+            const rows = config.interestAxes.map((a) => ({
+              axis_id: a.id,
+              label: a.label,
+            }));
+            return { results: rows as unknown as T[], success: true, meta: {} };
+          }
+          if (s.includes("FROM feed_source")) {
+            const rows = config.sources.feeds.map((url) => ({ url }));
+            return { results: rows as unknown as T[], success: true, meta: {} };
+          }
           // entries: bind(date, limit, offset)
           const limit = this._args[1] as number;
           const offset = this._args[2] as number;
@@ -90,7 +102,6 @@ function makeEnv(opts: {
   const env = {
     DB: db,
     AI: {},
-    CONFIG: { get: async () => JSON.stringify(config) },
   } as unknown as Env;
   return env;
 }

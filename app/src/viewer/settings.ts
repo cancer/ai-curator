@@ -1,6 +1,6 @@
 /**
- * 設定画面（FR-8）。KV の UserConfig（interestAxes / sources）をフォーム表示し、
- * 更新を KV に書き戻す。
+ * 設定画面（FR-8）。D1 の UserConfig（interestAxes / sources）をフォーム表示し、
+ * 更新を D1 に書き戻す。
  *
  * 編集対象: 関心軸（トピックの label のみ・追加/削除）と
  * ソース（feeds = 任意の RSS/Atom フィード URL のリスト）。
@@ -9,7 +9,7 @@
  * round-trip、新規軸は保存時に crypto.randomUUID() を採番する。これによりラベルを
  * 変えても過去の hit_axis/feed_trends が孤立しない。
  * scoring 等のシステム側パラメータ（SYSTEM_CONFIG）は表示のみ（UI で変更しない）。
- * KV が空でも空のひな形（EMPTY_USER_CONFIG）でフォームを開ける。
+ * D1 に軸が無くても空のひな形（EMPTY_USER_CONFIG）でフォームを開ける。
  *
  * 素の HTML `<form method="post">` のみで完結させる（JS を必須にしない）。
  */
@@ -203,7 +203,7 @@ function renderForm(
 }
 
 /**
- * `GET /settings`: KV の UserConfig（空なら既定）をフォーム表示する。
+ * `GET /settings`: D1 の UserConfig（空なら既定）をフォーム表示する。
  * `runId` は POST /run 直後（?run=<instanceId>）に、起動した Workflow インスタンスの
  * ID と状態照会リンクを注記するためのもの（無ければ null）。
  */
@@ -218,7 +218,7 @@ export async function renderSettingsForm(
 }
 
 /**
- * `POST /settings`: フォーム値を検証し、通れば saveConfig で KV 更新して
+ * `POST /settings`: フォーム値を検証し、通れば saveConfig で D1 更新して
  * 303 で GET /settings へリダイレクト。エラーは 400 + 入力値保持で再表示。
  */
 export async function handleSettingsUpdate(

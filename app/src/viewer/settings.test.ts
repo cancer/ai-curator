@@ -15,41 +15,117 @@ function baseUser(): UserConfig {
   };
 }
 
-/** KV に何も無い（空）状態の Env。フォーム初期表示のフォールバック検証用。 */
-function makeEmptyEnv() {
-  let stored: string | null = null;
-  const puts: string[] = [];
-  const CONFIG = {
-    get: async () => stored,
-    put: async (_k: string, v: string) => {
-      stored = v;
-      puts.push(v);
+/** interest_axes 行（派生列は cron が埋めるので初期 null）。 */
+interface AxisRow {
+  axis_id: string;
+  label: string;
+  seed_hash: string | null;
+  embedding: string | null;
+  embedding_model: string | null;
+}
+
+/**
+ * settings.ts が config 越しに使う D1 操作だけを実装する in-memory フェイク。
+ * - 読み取り(loadUserConfigForForm): interest_axes / feed_source を挿入順で返す。
+ * - 書き込み(saveConfig): batch の axis upsert / axis 除去 / feed 総入れ替えを適用する。
+ * `puts` は batch 呼び出し（= 保存）1 回につき 1 要素で、保存回数の検証に使う。
+ * `saved()` は現在の格納内容を UserConfig として返す。
+ */
+function makeStore(user: UserConfig | null) {
+  const axes: AxisRow[] = (user?.interestAxes ?? []).map((a) => ({
+    axis_id: a.id,
+    label: a.label,
+    seed_hash: `hash-${a.id}`,
+    embedding: "[0.1]",
+    embedding_model: "@cf/baai/bge-m3",
+  }));
+  const feeds: string[] = [...(user?.sources.feeds ?? [])];
+  const puts: unknown[] = [];
+
+  function apply(sql: string, args: unknown[]): void {
+    if (/^INSERT INTO interest_axes/i.test(sql)) {
+      const [axisId, label] = args as [string, string];
+      const existing = axes.find((a) => a.axis_id === axisId);
+      if (existing) existing.label = label;
+      else
+        axes.push({
+          axis_id: axisId,
+          label,
+          seed_hash: null,
+          embedding: null,
+          embedding_model: null,
+        });
+    } else if (/^DELETE FROM interest_axes WHERE axis_id NOT IN/i.test(sql)) {
+      const keep = new Set(args as string[]);
+      for (let i = axes.length - 1; i >= 0; i--) {
+        if (!keep.has(axes[i].axis_id)) axes.splice(i, 1);
+      }
+    } else if (/^DELETE FROM feed_source/i.test(sql)) {
+      feeds.length = 0;
+    } else if (/^INSERT INTO feed_source/i.test(sql)) {
+      feeds.push(args[0] as string);
+    } else {
+      throw new Error(`unexpected write SQL: ${sql}`);
+    }
+  }
+
+  const db = {
+    prepare(rawSql: string) {
+      const sql = rawSql.replace(/\s+/g, " ").trim();
+      return {
+        sql,
+        args: [] as unknown[],
+        bind(...a: unknown[]) {
+          this.args = a;
+          return this;
+        },
+        async all<T>() {
+          if (/FROM interest_axes/i.test(sql)) {
+            return {
+              results: axes.map((a) => ({
+                axis_id: a.axis_id,
+                label: a.label,
+              })) as T[],
+              success: true,
+              meta: {},
+            };
+          }
+          if (/FROM feed_source/i.test(sql)) {
+            return {
+              results: feeds.map((url) => ({ url })) as T[],
+              success: true,
+              meta: {},
+            };
+          }
+          throw new Error(`unexpected read SQL: ${sql}`);
+        },
+      };
+    },
+    async batch(stmts: Array<{ sql: string; args: unknown[] }>) {
+      for (const s of stmts) apply(s.sql, s.args);
+      puts.push(true);
+      return stmts.map(() => ({ success: true, meta: {} }));
     },
   };
-  const env = { CONFIG, DB: {}, AI: {} } as unknown as Env;
+
+  const env = { DB: db, AI: {} } as unknown as Env;
   return {
     env,
     puts,
-    saved: () => JSON.parse(puts[puts.length - 1]) as UserConfig,
+    saved: (): UserConfig => ({
+      interestAxes: axes.map((a) => ({ id: a.axis_id, label: a.label })),
+      sources: { feeds: [...feeds] },
+    }),
   };
 }
 
+/** D1 に何も無い（空）状態の Env。フォーム初期表示のフォールバック検証用。 */
+function makeEmptyEnv() {
+  return makeStore(null);
+}
+
 function makeEnv(user: UserConfig = baseUser()) {
-  let stored: string | null = JSON.stringify(user);
-  const puts: string[] = [];
-  const CONFIG = {
-    get: async () => stored,
-    put: async (_k: string, v: string) => {
-      stored = v;
-      puts.push(v);
-    },
-  };
-  const env = { CONFIG, DB: {}, AI: {} } as unknown as Env;
-  return {
-    env,
-    puts,
-    saved: () => JSON.parse(puts[puts.length - 1]) as UserConfig,
-  };
+  return makeStore(user);
 }
 
 function postForm(fields: Record<string, string>): Request {

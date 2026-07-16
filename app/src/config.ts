@@ -1,9 +1,10 @@
 /**
- * 設定の型と KV アクセス。
+ * 設定の型と D1 アクセス。
  *
  * 設定は 2 層に分かれる:
- * - UserConfig（interestAxes / sources）: ユーザー可変データ。KV キー `config:v1`
- *   に保存し、設定画面(/settings)から編集する。コードやファイルに書かない。
+ * - UserConfig（interestAxes / sources）: ユーザー可変データ。D1 の正規化テーブル
+ *   （interest_axes の源泉列 axis_id/label、feed_source の url）に保存し、
+ *   設定画面(/settings)から編集する。コードやファイルに書かない。
  * - SYSTEM_CONFIG（scoring / embedding / digest）: v1 ではコード内固定。UI 非公開で、
  *   変更するにはこの定数を編集する。
  *
@@ -69,7 +70,7 @@ export interface SystemConfig {
   digest: DigestConfig;
 }
 
-/** ユーザー可変データ（KV `config:v1` に保存する唯一の対象）。 */
+/** ユーザー可変データ（D1 の interest_axes 源泉列 / feed_source に保存する唯一の対象）。 */
 export interface UserConfig {
   interestAxes: InterestAxis[];
   sources: Sources;
@@ -117,8 +118,8 @@ export const SYSTEM_CONFIG: SystemConfig = {
 };
 
 /**
- * KV が空/不正なときに `GET /settings` を開くための空のひな形。
- * 実際の設定（トピック・フィード）はコードに持たず、すべて KV に置く。
+ * 軸が 1 件も無いときに `GET /settings` を開くための空のひな形。
+ * 実際の設定（トピック・フィード）はコードに持たず、すべて D1 に置く。
  * これはあくまで「まだ何も無い」状態を表す空フォーム用で、そのままでは
  * 保存できない（保存には関心軸が 1 つ以上必要）。
  */
@@ -227,51 +228,84 @@ function validateUserConfig(data: unknown): UserConfig {
 }
 
 /**
- * KV の UserConfig を検証し、SYSTEM_CONFIG をマージして完全な Config を返す。
- * KV 欠落・JSON 不正・検証失敗は throw（fail-fast。黙って既定値にしない）。
+ * D1 の正規化テーブルから UserConfig を組み立てる（検証はしない）。
+ * axis_id/label は interest_axes の源泉列、feeds は feed_source から読む。
+ * どちらも id（INTEGER PRIMARY KEY = 挿入順）昇順で返し、設定画面の並びを保つ。
  */
-export async function loadConfig(env: Env): Promise<Config> {
-  const raw = await env.CONFIG.get("config:v1");
+async function readUserConfig(db: D1Database): Promise<UserConfig> {
+  const axisRows =
+    (
+      await db
+        .prepare("SELECT axis_id, label FROM interest_axes ORDER BY id")
+        .all<{ axis_id: string; label: string }>()
+    ).results ?? [];
+  const feedRows =
+    (
+      await db
+        .prepare("SELECT url FROM feed_source ORDER BY id")
+        .all<{ url: string }>()
+    ).results ?? [];
 
-  if (!raw) {
-    throw new Error('Config key "config:v1" not found in KV');
-  }
-
-  let data: unknown;
-  try {
-    data = JSON.parse(raw);
-  } catch (e) {
-    throw new Error(
-      `Failed to parse config JSON: ${e instanceof Error ? e.message : String(e)}`
-    );
-  }
-
-  return { ...validateUserConfig(data), ...SYSTEM_CONFIG };
+  return {
+    interestAxes: axisRows.map((r) => ({ id: r.axis_id, label: r.label })),
+    sources: { feeds: feedRows.map((r) => r.url) },
+  };
 }
 
 /**
- * UserConfig を検証し、interestAxes / sources のみを KV に書く。
+ * D1 の UserConfig を検証し、SYSTEM_CONFIG をマージして完全な Config を返す。
+ * 軸 0 件・検証失敗は throw（fail-fast。黙って既定値にしない）。
+ */
+export async function loadConfig(env: Env): Promise<Config> {
+  const user = await readUserConfig(env.DB);
+  return { ...validateUserConfig(user), ...SYSTEM_CONFIG };
+}
+
+/**
+ * UserConfig を検証し、interestAxes / sources を D1 へ原子的に書く。
+ * batch（暗黙トランザクション）で「軸の upsert → config から消えた軸の除去 →
+ * feed の総入れ替え」をまとめて適用する。軸の upsert は源泉列（axis_id/label）だけを
+ * 触り、派生列（seed_hash/embedding/embedding_model）には触れない — label 変更時に
+ * seed_hash が旧値のまま残り、次 cron が hash 不一致で再 embed する現行挙動を保つ。
  * 検証違反は throw（呼び出し側で 400 にする）。
  */
 export async function saveConfig(env: Env, user: UserConfig): Promise<void> {
   const validated = validateUserConfig(user);
 
-  await env.CONFIG.put("config:v1", JSON.stringify(validated));
+  const statements: D1PreparedStatement[] = [];
+  for (const axis of validated.interestAxes) {
+    statements.push(
+      env.DB.prepare(
+        "INSERT INTO interest_axes (axis_id, label) VALUES (?, ?) " +
+          "ON CONFLICT(axis_id) DO UPDATE SET label = excluded.label"
+      ).bind(axis.id, axis.label)
+    );
+  }
+  // config から消えた軸を除去する（検証で軸 ≥ 1 保証済みなので IN は非空）。
+  const axisIds = validated.interestAxes.map((a) => a.id);
+  statements.push(
+    env.DB.prepare(
+      `DELETE FROM interest_axes WHERE axis_id NOT IN (${axisIds
+        .map(() => "?")
+        .join(", ")})`
+    ).bind(...axisIds)
+  );
+  // feeds は KV blob の総入れ替えと等価に delete → insert する。
+  statements.push(env.DB.prepare("DELETE FROM feed_source"));
+  for (const url of validated.sources.feeds) {
+    statements.push(
+      env.DB.prepare("INSERT INTO feed_source (url) VALUES (?)").bind(url)
+    );
+  }
+
+  await env.DB.batch(statements);
 }
 
 /**
- * 設定画面の初期表示用。KV が存在し妥当なら KV の UserConfig を、
- * 無い・不正なら EMPTY_USER_CONFIG（空フォーム）を返す（throw しない。空 KV でもフォームを開ける）。
+ * 設定画面の初期表示用。軸が 1 件以上あれば D1 の UserConfig を、無ければ
+ * EMPTY_USER_CONFIG（空フォーム）を返す（throw しない。空 D1 でもフォームを開ける）。
  */
 export async function loadUserConfigForForm(env: Env): Promise<UserConfig> {
-  const raw = await env.CONFIG.get("config:v1");
-  if (!raw) {
-    return EMPTY_USER_CONFIG;
-  }
-
-  try {
-    return validateUserConfig(JSON.parse(raw));
-  } catch {
-    return EMPTY_USER_CONFIG;
-  }
+  const user = await readUserConfig(env.DB);
+  return user.interestAxes.length === 0 ? EMPTY_USER_CONFIG : user;
 }
