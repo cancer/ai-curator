@@ -42,7 +42,8 @@ npx wrangler d1 create ai-curator-db
 
 `migrations/` 一式を適用する（`0001_init.sql` の articles / interest_axes / feedback /
 feed_entries / feed_trends に加え、`0005_promote_interest_axes_and_feeds.sql` で
-interest_axes を設定の源泉テーブルへ昇格し、フィードを保持する feed_source を作る）。
+interest_axes を設定の源泉テーブルへ昇格し、フィードを保持する feed_source を作る。
+`0006_add_axis_category.sql` で interest_axes に category 列（関心軸のカテゴリ、NULL 許容）を足す）。
 
 ```bash
 # ローカル（wrangler dev 用の擬似 D1）
