@@ -15,10 +15,11 @@ function baseUser(): UserConfig {
   };
 }
 
-/** interest_axes 行（派生列は cron が埋めるので初期 null）。 */
+/** interest_axes 行（派生列は cron が埋めるので初期 null。category は源泉列で未分類は null）。 */
 interface AxisRow {
   axis_id: string;
   label: string;
+  category: string | null;
   seed_hash: string | null;
   embedding: string | null;
   embedding_model: string | null;
@@ -35,6 +36,7 @@ function makeStore(user: UserConfig | null) {
   const axes: AxisRow[] = (user?.interestAxes ?? []).map((a) => ({
     axis_id: a.id,
     label: a.label,
+    category: a.category ?? null,
     seed_hash: `hash-${a.id}`,
     embedding: "[0.1]",
     embedding_model: "@cf/baai/bge-m3",
@@ -44,13 +46,20 @@ function makeStore(user: UserConfig | null) {
 
   function apply(sql: string, args: unknown[]): void {
     if (/^INSERT INTO interest_axes/i.test(sql)) {
-      const [axisId, label] = args as [string, string];
+      const [axisId, label, category] = args as [
+        string,
+        string,
+        string | null,
+      ];
       const existing = axes.find((a) => a.axis_id === axisId);
-      if (existing) existing.label = label;
-      else
+      if (existing) {
+        existing.label = label;
+        existing.category = category;
+      } else
         axes.push({
           axis_id: axisId,
           label,
+          category,
           seed_hash: null,
           embedding: null,
           embedding_model: null,
@@ -85,6 +94,7 @@ function makeStore(user: UserConfig | null) {
               results: axes.map((a) => ({
                 axis_id: a.axis_id,
                 label: a.label,
+                category: a.category,
               })) as T[],
               success: true,
               meta: {},
@@ -113,7 +123,12 @@ function makeStore(user: UserConfig | null) {
     env,
     puts,
     saved: (): UserConfig => ({
-      interestAxes: axes.map((a) => ({ id: a.axis_id, label: a.label })),
+      // category が null/空なら key を落とす（config の未分類セマンティクスを再現）。
+      interestAxes: axes.map((a) =>
+        a.category != null && a.category !== ""
+          ? { id: a.axis_id, label: a.label, category: a.category }
+          : { id: a.axis_id, label: a.label },
+      ),
       sources: { feeds: [...feeds] },
     }),
   };
@@ -195,6 +210,44 @@ describe("renderSettingsForm", () => {
     expect(html).toContain("日次パスを起動しました");
     expect(html).toContain("abc-123");
     expect(html).toContain('href="/runs/abc-123"');
+  });
+
+  it("renders a category input per axis, prefilled and wired to the datalist", async () => {
+    const { env } = makeEnv({
+      interestAxes: [
+        { id: "ai", label: "AI", category: "技術" },
+        { id: "life", label: "暮らし" },
+      ],
+      sources: { feeds: [] },
+    });
+    const html = await (await renderSettingsForm(env)).text();
+    expect(html).toContain('name="axis-0-category"');
+    expect(html).toContain('name="axis-1-category"');
+    expect(html).toContain('list="axis-categories"');
+    // 既存カテゴリが value に入る（未分類の軸は空）。
+    expect(html).toContain('value="技術"');
+  });
+
+  it("renders a single datalist of the distinct existing categories", async () => {
+    const { env } = makeEnv({
+      interestAxes: [
+        { id: "a", label: "A", category: "技術" },
+        { id: "b", label: "B", category: "技術" },
+        { id: "c", label: "C", category: "暮らし" },
+      ],
+      sources: { feeds: [] },
+    });
+    const html = await (await renderSettingsForm(env)).text();
+    expect(html).toContain('<datalist id="axis-categories">');
+    // distinct: 技術 は option 1 個だけ。
+    expect((html.match(/<option value="技術"/g) ?? []).length).toBe(1);
+    expect(html).toContain('<option value="暮らし"');
+  });
+
+  it("renders a single category input for the newly added topics", async () => {
+    const { env } = makeEnv();
+    const html = await (await renderSettingsForm(env)).text();
+    expect(html).toContain('name="newTopicsCategory"');
   });
 });
 
@@ -278,5 +331,43 @@ describe("handleSettingsUpdate", () => {
     const res = await handleSettingsUpdate(env, postForm(fields));
     expect(res.status).toBe(400);
     expect(puts.length).toBe(0);
+  });
+
+  it("saves the category entered for each existing axis", async () => {
+    const { env, saved } = makeEnv();
+    const fields = validFields();
+    fields["axis-0-category"] = "技術";
+    await handleSettingsUpdate(env, postForm(fields));
+    const ai = saved().interestAxes.find((a) => a.id === "ai");
+    expect(ai?.category).toBe("技術");
+  });
+
+  it("leaves an axis unclassified when its category input is empty", async () => {
+    const { env, saved } = makeEnv();
+    const res = await handleSettingsUpdate(env, postForm(validFields()));
+    expect(res.status).toBe(303);
+    // category 未入力の軸は key を持たない（未分類）。
+    expect("category" in saved().interestAxes[0]).toBe(false);
+  });
+
+  it("applies newTopicsCategory to every newly added topic", async () => {
+    const { env, saved } = makeEnv();
+    const fields = validFields();
+    fields.newTopics = "Topic A\nTopic B";
+    fields.newTopicsCategory = "新カテゴリ";
+    await handleSettingsUpdate(env, postForm(fields));
+    const added = saved().interestAxes.filter(
+      (a) => a.label === "Topic A" || a.label === "Topic B",
+    );
+    expect(added.map((a) => a.category)).toEqual(["新カテゴリ", "新カテゴリ"]);
+  });
+
+  it("leaves new topics unclassified when newTopicsCategory is empty", async () => {
+    const { env, saved } = makeEnv();
+    const fields = validFields();
+    fields.newTopics = "Topic A";
+    await handleSettingsUpdate(env, postForm(fields));
+    const added = saved().interestAxes.find((a) => a.label === "Topic A");
+    expect(added && "category" in added).toBe(false);
   });
 });

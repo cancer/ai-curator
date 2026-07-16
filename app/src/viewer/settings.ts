@@ -29,6 +29,8 @@ import { escapeHtml, page, htmlResponse } from "./layout";
 interface AxisField {
   id: string;
   label: string;
+  /** 関心軸のカテゴリ。空文字は未分類（保存時に key を落とす）。 */
+  category: string;
 }
 
 /** 送信値・config どちらからも組み立てる、フォーム再現用のモデル。 */
@@ -39,7 +41,11 @@ interface FormModel {
 
 function modelFromUserConfig(user: UserConfig): FormModel {
   return {
-    axes: user.interestAxes.map((a) => ({ id: a.id, label: a.label })),
+    axes: user.interestAxes.map((a) => ({
+      id: a.id,
+      label: a.label,
+      category: a.category ?? "",
+    })),
     feeds: user.sources.feeds.join("\n"),
   };
 }
@@ -76,12 +82,15 @@ function modelFromForm(form: FormData): FormModel {
     const id = String(form.get(`axis-${i}-id`) ?? "").trim();
     const label = String(form.get(`axis-${i}-label`) ?? "").trim();
     if (id === "" && label === "") continue;
-    axes.push({ id, label });
+    const category = String(form.get(`axis-${i}-category`) ?? "").trim();
+    axes.push({ id, label, category });
   }
 
   // 新規トピックは textarea（1 行 1 件）から取り込む。id は保存時に採番。
+  // カテゴリは 1 入力（newTopicsCategory）を新規トピック全件に適用する（空なら未分類）。
+  const newTopicsCategory = String(form.get("newTopicsCategory") ?? "").trim();
   for (const label of lines(String(form.get("newTopics") ?? ""))) {
-    axes.push({ id: "", label });
+    axes.push({ id: "", label, category: newTopicsCategory });
   }
 
   return {
@@ -114,10 +123,11 @@ function validate(model: FormModel): string[] {
 
 /** 検証済みモデルから保存用の UserConfig を組み立てる。新規軸に id を採番する。 */
 function buildUserConfig(model: FormModel): UserConfig {
-  const interestAxes: InterestAxis[] = model.axes.map((a) => ({
-    id: a.id === "" ? crypto.randomUUID() : a.id,
-    label: a.label,
-  }));
+  const interestAxes: InterestAxis[] = model.axes.map((a) => {
+    const base = { id: a.id === "" ? crypto.randomUUID() : a.id, label: a.label };
+    // 空文字は未分類。category key を付けない（config の未分類セマンティクスに合わせる）。
+    return a.category === "" ? base : { ...base, category: a.category };
+  });
   return {
     interestAxes,
     sources: {
@@ -128,14 +138,26 @@ function buildUserConfig(model: FormModel): UserConfig {
 
 function renderAxis(index: number, axis: AxisField): string {
   // id は不変キー。既存軸は hidden で round-trip、新規行は空（保存時に採番）。
+  // category は datalist(axis-categories)で既存カテゴリを補完させつつ自由入力もできる。
   return (
     `<fieldset>` +
     `<input type="hidden" name="axis-${index}-id" value="${escapeHtml(axis.id)}">` +
     `<label>トピック（ラベル）</label>` +
     `<input name="axis-${index}-label" value="${escapeHtml(axis.label)}">` +
+    `<label>カテゴリ</label>` +
+    `<input name="axis-${index}-category" list="axis-categories" value="${escapeHtml(axis.category)}">` +
     `<label><input type="checkbox" name="axis-${index}-delete"> この軸を削除</label>` +
     `</fieldset>`
   );
+}
+
+/** 既存軸の category から重複を除いた候補を <datalist> にする（JS 不要の入力補完）。 */
+function renderCategoryDatalist(axes: AxisField[]): string {
+  const distinct = [...new Set(axes.map((a) => a.category).filter((c) => c !== ""))];
+  const options = distinct
+    .map((c) => `<option value="${escapeHtml(c)}">`)
+    .join("");
+  return `<datalist id="axis-categories">${options}</datalist>`;
 }
 
 function renderForm(
@@ -188,9 +210,12 @@ function renderForm(
     `<form method="post" action="/settings">` +
     `<h2>関心軸</h2>` +
     `<p class="note">トピックのラベルだけ入力してください（日本語可）。関心記述文とベクトルは次回の日次パスがラベルから自動生成します。ラベルを変えると次回パスで再生成されます。</p>` +
+    renderCategoryDatalist(model.axes) +
     axisFields +
     `<label>トピックを追加（1 行 1 件。Enter は改行 — 反映は下の「保存」）</label>` +
     `<textarea name="newTopics" rows="4"></textarea>` +
+    `<label>新規トピックのカテゴリ（追加分すべてに適用。空なら未分類）</label>` +
+    `<input name="newTopicsCategory" list="axis-categories" value="">` +
     `<h2>ソース</h2>` +
     `<p class="note">購読するフィードの URL を 1 行 1 件で入力してください（RSS/Atom。ブログ / Medium 著者 / ニュースレター等）。</p>` +
     `<label>フィード URL（1 行 1 件）</label>` +
