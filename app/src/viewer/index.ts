@@ -45,23 +45,24 @@ const COUNT_SQL =
 
 // カテゴリ指定時の JOIN 版。hit_axis→interest_axes を LEFT JOIN して category を引く。
 // ENTRIES と COUNT に同一の FROM/JOIN/WHERE 述語を適用する — 不一致は offset 破綻・
-// 空ページの原因になる（最重要）。列は非フィルタ版と同一（EntryRow を満たす）。
+// 空ページの原因になる（最重要）。FROM/JOIN は 1 つの共有定数に集約し、片方だけ
+// 書き換わって発散する余地を消す（列は非フィルタ版と同一で EntryRow を満たす）。
+const FILTERED_FROM_JOIN =
+  "FROM feed_entries fe JOIN articles a ON a.id = fe.article_id " +
+  "LEFT JOIN interest_axes ax ON ax.axis_id = a.hit_axis";
+
 const ENTRIES_SQL_FILTERED_HEAD =
   "SELECT fe.id AS feed_entry_id, fe.rank AS rank, s.text AS summary, " +
   "a.title AS title, a.source AS source, a.published_at AS published_at, " +
   "a.url AS url, a.hit_axis AS hit_axis, av.vote AS vote " +
-  "FROM feed_entries fe JOIN articles a ON a.id = fe.article_id " +
-  "LEFT JOIN interest_axes ax ON ax.axis_id = a.hit_axis " +
-  "LEFT JOIN summaries s ON s.article_id = fe.article_id " +
+  FILTERED_FROM_JOIN +
+  " LEFT JOIN summaries s ON s.article_id = fe.article_id " +
   "LEFT JOIN article_vote av ON av.article_id = fe.article_id " +
   "WHERE fe.date = ? ";
 const ENTRIES_SQL_FILTERED_TAIL = " ORDER BY fe.rank LIMIT ? OFFSET ?";
 
 const COUNT_SQL_FILTERED_HEAD =
-  "SELECT COUNT(*) AS total FROM feed_entries fe " +
-  "JOIN articles a ON a.id = fe.article_id " +
-  "LEFT JOIN interest_axes ax ON ax.axis_id = a.hit_axis " +
-  "WHERE fe.date = ? ";
+  "SELECT COUNT(*) AS total " + FILTERED_FROM_JOIN + " WHERE fe.date = ? ";
 
 const TRENDS_SQL_FILTERED_HEAD =
   "SELECT ft.axis_id AS axis_id, ft.hit_count AS hit_count, " +
@@ -86,7 +87,10 @@ function parseCategoryFilter(category: string | null): CategoryFilter {
   return { mode: "named", category };
 }
 
-/** カテゴリ絞り込みの WHERE 追加述語（entries 用。trends は hit_axis 列が無いので別）。 */
+/**
+ * カテゴリ絞り込みの WHERE 追加述語。ENTRIES と COUNT の両方が共有し、両者の述語一致
+ * （offset 整合の要）をこの 1 箇所で保証する。trends は hit_axis 列が無いので別述語。
+ */
 function entriesPredicate(filter: CategoryFilter): string {
   return filter.mode === "named"
     ? "AND ax.category = ?"
