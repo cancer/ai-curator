@@ -23,10 +23,11 @@ const validUser: UserConfig = {
   },
 };
 
-/** interest_axes 行（派生列は cron が埋めるので初期 null）。 */
+/** interest_axes 行（派生列は cron が埋めるので初期 null。category は源泉列で未分類は null）。 */
 interface AxisRow {
   axis_id: string;
   label: string;
+  category: string | null;
   seed_hash: string | null;
   embedding: string | null;
   embedding_model: string | null;
@@ -66,15 +67,23 @@ function makeDb(seed?: { axes?: AxisRow[]; feeds?: string[] }) {
 
   function apply(sql: string, args: unknown[]): void {
     if (/^INSERT INTO interest_axes/i.test(sql)) {
-      const [axisId, label] = args as [string, string];
+      const [axisId, label, category] = args as [
+        string,
+        string,
+        string | null,
+      ];
       const existing = axes.find((a) => a.axis_id === axisId);
       if (existing) {
-        existing.label = label; // 派生列は据え置き（ON CONFLICT DO UPDATE SET label のみ）
+        // 源泉列（label/category）だけ更新。派生列は据え置き
+        // （ON CONFLICT DO UPDATE SET label, category）。
+        existing.label = label;
+        existing.category = category;
       } else {
         axes.push({
           id: nextId++,
           axis_id: axisId,
           label,
+          category,
           seed_hash: null,
           embedding: null,
           embedding_model: null,
@@ -116,6 +125,7 @@ function makeDb(seed?: { axes?: AxisRow[]; feeds?: string[] }) {
               results: rows.map((a) => ({
                 axis_id: a.axis_id,
                 label: a.label,
+                category: a.category,
               })) as T[],
               success: true,
               meta: {},
@@ -161,6 +171,7 @@ function seededAxes(): AxisRow[] {
   return validUser.interestAxes.map((a) => ({
     axis_id: a.id,
     label: a.label,
+    category: null,
     seed_hash: `hash-${a.id}`,
     embedding: "[0.1,0.2]",
     embedding_model: "@cf/baai/bge-m3",
@@ -351,6 +362,93 @@ describe("config", () => {
       await saveConfig(env, user);
 
       expect(feeds).toEqual([]);
+    });
+  });
+
+  describe("category (interest axis grouping)", () => {
+    it("round-trips a category on an axis and treats a missing category as unclassified", async () => {
+      const { env } = makeEnv();
+      const user: UserConfig = {
+        interestAxes: [
+          { id: "ai", label: "AI", category: "技術" },
+          { id: "life", label: "暮らし" },
+        ],
+        sources: { feeds: [] },
+      };
+
+      await saveConfig(env, user);
+      const result = await loadConfig(env);
+
+      // category ありは値ごと往復し、無い軸は key を付けない（未分類）。
+      expect(result.interestAxes).toEqual([
+        { id: "ai", label: "AI", category: "技術" },
+        { id: "life", label: "暮らし" },
+      ]);
+    });
+
+    it("omits the category key when the stored category is null or empty", async () => {
+      const { env } = makeEnv({
+        axes: [
+          {
+            axis_id: "ai",
+            label: "AI",
+            category: null,
+            seed_hash: null,
+            embedding: null,
+            embedding_model: null,
+          },
+          {
+            axis_id: "web",
+            label: "Web",
+            category: "",
+            seed_hash: null,
+            embedding: null,
+            embedding_model: null,
+          },
+        ],
+        feeds: [],
+      });
+
+      const result = await loadConfig(env);
+
+      // null も空文字も「未分類」として返却から category を落とす（null ノイズを混ぜない）。
+      expect("category" in result.interestAxes[0]).toBe(false);
+      expect("category" in result.interestAxes[1]).toBe(false);
+    });
+
+    it("treats a whitespace-only category as unclassified (trims, then omits the key)", async () => {
+      const { env } = makeEnv();
+
+      await saveConfig(env, {
+        interestAxes: [{ id: "ai", label: "AI", category: "   " }],
+        sources: { feeds: [] },
+      });
+      const result = await loadConfig(env);
+
+      expect("category" in result.interestAxes[0]).toBe(false);
+    });
+
+    it("trims surrounding whitespace from a non-empty category", async () => {
+      const { env } = makeEnv();
+
+      await saveConfig(env, {
+        interestAxes: [{ id: "ai", label: "AI", category: "  技術  " }],
+        sources: { feeds: [] },
+      });
+      const result = await loadConfig(env);
+
+      expect(result.interestAxes[0].category).toBe("技術");
+    });
+
+    it("rejects a non-string category", async () => {
+      const { env } = makeEnv();
+
+      await expect(
+        saveConfig(env, {
+          interestAxes: [{ id: "ai", label: "AI", category: 123 }],
+          sources: { feeds: [] },
+        } as unknown as UserConfig),
+      ).rejects.toThrow("InterestAxis.category");
     });
   });
 

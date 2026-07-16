@@ -37,7 +37,7 @@ export default {
 
     if (method === "GET" && pathname === "/") {
       const page = Number(url.searchParams.get("page") ?? "1");
-      return renderFeedPage(env, page);
+      return renderFeedPage(env, page, url.searchParams.get("category"));
     }
     if (method === "GET" && pathname === "/settings") {
       return renderSettingsForm(env, url.searchParams.get("run"));

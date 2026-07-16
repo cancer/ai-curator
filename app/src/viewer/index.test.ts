@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { renderFeedPage } from "./index";
+import { renderFeedPage, UNCATEGORIZED } from "./index";
 import type { Env } from "../index";
 import type { Config } from "../config";
 
@@ -52,6 +52,43 @@ function makeEnv(opts: {
   config?: Config;
 }) {
   const entries = [...(opts.entries ?? [])].sort((a, b) => a.rank - b.rank);
+  const config = opts.config ?? baseConfig();
+
+  // hit_axis → その軸の category（未設定は undefined）。JOIN interest_axes を模す。
+  const axisCategory = new Map(
+    config.interestAxes.map((a) => [a.id, a.category] as const),
+  );
+  // 記事の実効カテゴリ: hit_axis が null、または軸に category が無ければ「未分類」(null)。
+  const entryCat = (e: EntryRow): string | null =>
+    e.hit_axis === null ? null : (axisCategory.get(e.hit_axis) ?? null);
+  const trendCat = (t: TrendRow): string | null =>
+    axisCategory.get(t.axis_id) ?? null;
+
+  // 発行 SQL の述語からフィルタのモードと束縛カテゴリを読み取る。
+  // named 版は bind(date, category, ...)、all/uncat 版は bind(date, ...) で
+  // category を束縛しない — ここを取り違えると offset/limit の位置がずれる。
+  type Mode =
+    | { kind: "all" }
+    | { kind: "named"; cat: unknown }
+    | { kind: "uncat" };
+  function modeOf(s: string, args: unknown[]): Mode {
+    if (/ax\.category = \?/.test(s)) return { kind: "named", cat: args[1] };
+    if (/ax\.category IS NULL/.test(s)) return { kind: "uncat" };
+    return { kind: "all" };
+  }
+  const keepEntry = (e: EntryRow, m: Mode): boolean =>
+    m.kind === "all"
+      ? true
+      : m.kind === "named"
+        ? entryCat(e) === m.cat
+        : entryCat(e) === null;
+  const keepTrend = (t: TrendRow, m: Mode): boolean =>
+    m.kind === "all"
+      ? true
+      : m.kind === "named"
+        ? trendCat(t) === m.cat
+        : trendCat(t) === null;
+
   const db = {
     prepare(sql: string) {
       const s = sql.replace(/\s+/g, " ").trim();
@@ -66,15 +103,19 @@ function makeEnv(opts: {
             return { date: opts.maxDate } as unknown as T;
           }
           if (s.includes("COUNT(*)")) {
-            return { total: entries.length } as unknown as T;
+            // COUNT は ENTRIES と同一述語で数える（offset 破綻・空ページ防止）。
+            const m = modeOf(s, this._args);
+            const total = entries.filter((e) => keepEntry(e, m)).length;
+            return { total } as unknown as T;
           }
           return null;
         },
         async all<T>() {
           if (s.includes("FROM feed_trends")) {
-            const sorted = [...(opts.trends ?? [])].sort(
-              (a, b) => b.hit_count - a.hit_count,
-            );
+            const m = modeOf(s, this._args);
+            const sorted = [...(opts.trends ?? [])]
+              .filter((t) => keepTrend(t, m))
+              .sort((a, b) => b.hit_count - a.hit_count);
             return { results: sorted as unknown as T[], success: true, meta: {} };
           }
           // loadConfig: 設定は D1 の interest_axes / feed_source から読む。
@@ -82,6 +123,7 @@ function makeEnv(opts: {
             const rows = config.interestAxes.map((a) => ({
               axis_id: a.id,
               label: a.label,
+              category: a.category ?? null,
             }));
             return { results: rows as unknown as T[], success: true, meta: {} };
           }
@@ -89,16 +131,18 @@ function makeEnv(opts: {
             const rows = config.sources.feeds.map((url) => ({ url }));
             return { results: rows as unknown as T[], success: true, meta: {} };
           }
-          // entries: bind(date, limit, offset)
-          const limit = this._args[1] as number;
-          const offset = this._args[2] as number;
-          const slice = entries.slice(offset, offset + limit);
+          // entries: all/uncat は bind(date, limit, offset)、named は bind(date, cat, limit, offset)。
+          const m = modeOf(s, this._args);
+          const limitIdx = m.kind === "named" ? 2 : 1;
+          const limit = this._args[limitIdx] as number;
+          const offset = this._args[limitIdx + 1] as number;
+          const filtered = entries.filter((e) => keepEntry(e, m));
+          const slice = filtered.slice(offset, offset + limit);
           return { results: slice as unknown as T[], success: true, meta: {} };
         },
       };
     },
   };
-  const config = opts.config ?? baseConfig();
   const env = {
     DB: db,
     AI: {},
@@ -342,6 +386,134 @@ describe("renderFeedPage", () => {
       expect(html).toContain("全5件");
       expect(html).not.toContain('href="/?page=2"');
       expect(html).not.toContain('href="/?page=0"');
+    });
+  });
+
+  describe("category filter", () => {
+    // ai/web=技術, life=生活, misc=カテゴリ無し（未分類扱い）。
+    function categorizedConfig(): Config {
+      return {
+        ...baseConfig(),
+        interestAxes: [
+          { id: "ai", label: "AI", category: "技術" },
+          { id: "web", label: "Web", category: "技術" },
+          { id: "life", label: "暮らし", category: "生活" },
+          { id: "misc", label: "雑多" },
+        ],
+      };
+    }
+
+    // 技術×2(ai,web) / 生活×1(life) / 未分類×2(hit_axis null, misc=カテゴリ無し)。
+    const mixed = [
+      entryRow({ rank: 1, feed_entry_id: 1, hit_axis: "ai" }),
+      entryRow({ rank: 2, feed_entry_id: 2, hit_axis: "life" }),
+      entryRow({ rank: 3, feed_entry_id: 3, hit_axis: "web" }),
+      entryRow({ rank: 4, feed_entry_id: 4, hit_axis: null }),
+      entryRow({ rank: 5, feed_entry_id: 5, hit_axis: "misc" }),
+    ];
+
+    const enc = encodeURIComponent;
+
+    it("renders a nav of distinct categories plus an unclassified link", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: mixed,
+        config: categorizedConfig(),
+      });
+      const html = await (await renderFeedPage(env, 1, null)).text();
+      // distinct: 技術 のリンクは 1 個だけ（ai/web が同一カテゴリ）。
+      const tech = new RegExp(`href="/\\?category=${enc("技術")}"`, "g");
+      expect((html.match(tech) ?? []).length).toBe(1);
+      expect(html).toContain(`href="/?category=${enc("生活")}"`);
+      // 未分類 は専用リンク（センチネル）。
+      expect(html).toContain(`href="/?category=${UNCATEGORIZED}"`);
+      expect(html).toContain("未分類");
+    });
+
+    it("marks the current category as active (rendered as text, not a link)", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: mixed,
+        config: categorizedConfig(),
+      });
+      const html = await (await renderFeedPage(env, 1, "技術")).text();
+      // 現在のカテゴリはリンクにしない（strong で現在地を示す）。
+      expect(html).toContain("<strong>技術</strong>");
+      expect(html).not.toContain(`href="/?category=${enc("技術")}"`);
+      // すべて は選択解除リンクとして残る。
+      expect(html).toContain('href="/"');
+    });
+
+    it("filters entries and counts them under the same predicate (named category)", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: mixed,
+        config: categorizedConfig(),
+      });
+      const html = await (await renderFeedPage(env, 1, "技術")).text();
+      // 技術(ai/web)だけが出る。
+      expect(html).toContain('href="/r/1"');
+      expect(html).toContain('href="/r/3"');
+      expect(html).not.toContain('href="/r/2"');
+      expect(html).not.toContain('href="/r/4"');
+      expect(html).not.toContain('href="/r/5"');
+      // COUNT も同じ述語なので総件数は 2。
+      expect(html).toContain("全2件");
+    });
+
+    it("filters to unclassified entries (null hit_axis or axis without a category)", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: mixed,
+        config: categorizedConfig(),
+      });
+      const html = await (await renderFeedPage(env, 1, UNCATEGORIZED)).text();
+      expect(html).toContain('href="/r/4"'); // hit_axis null
+      expect(html).toContain('href="/r/5"'); // misc: カテゴリ未設定
+      expect(html).not.toContain('href="/r/1"');
+      expect(html).toContain("全2件");
+    });
+
+    it("filters trends to the selected category", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: mixed,
+        config: categorizedConfig(),
+        trends: [
+          { axis_id: "ai", hit_count: 3, narrative: "AI話題" },
+          { axis_id: "life", hit_count: 5, narrative: "暮らし話題" },
+        ],
+      });
+      const html = await (await renderFeedPage(env, 1, "技術")).text();
+      expect(html).toContain("AI話題");
+      expect(html).not.toContain("暮らし話題");
+    });
+
+    it("preserves the category in pagination links", async () => {
+      const many = Array.from({ length: 25 }, (_, i) =>
+        entryRow({ rank: i + 1, feed_entry_id: i + 1, hit_axis: "ai" }),
+      );
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: many,
+        config: categorizedConfig(),
+      });
+      const html = await (await renderFeedPage(env, 1, "技術")).text();
+      expect(html).toContain(`href="/?category=${enc("技術")}&page=2"`);
+      expect(html).toContain("全25件");
+    });
+
+    it("leaves the feed unfiltered when no category is given (unchanged behavior)", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: mixed,
+        config: categorizedConfig(),
+      });
+      const html = await (await renderFeedPage(env, 1, null)).text();
+      // 全 5 件がそのまま出る。
+      expect(html).toContain("全5件");
+      expect(html).toContain('href="/r/1"');
+      expect(html).toContain('href="/r/4"');
     });
   });
 });
