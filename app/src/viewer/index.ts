@@ -28,41 +28,24 @@ const TRENDS_SQL =
   "SELECT axis_id, hit_count, narrative FROM feed_trends " +
   "WHERE date = ? ORDER BY hit_count DESC";
 
-// 要約は summaries に分離済み（1 記事 1 行）。行が無ければ summary は NULL。
-// LIMIT/OFFSET で 1 ページ分だけ取る。総件数は COUNT_SQL で別途数える。
-const ENTRIES_SQL =
-  "SELECT fe.id AS feed_entry_id, fe.rank AS rank, s.text AS summary, " +
-  "a.title AS title, a.source AS source, a.published_at AS published_at, " +
-  "a.url AS url, a.hit_axis AS hit_axis, av.vote AS vote " +
+// ENTRIES と COUNT が共有する FROM/JOIN。hit_axis→interest_axes（category 引き）、
+// article_id→summaries（要約有無・本文）、article_id→article_vote（投票）を LEFT JOIN する。
+// 両クエリが同一の FROM/JOIN/WHERE 述語を共有することが offset 整合の要 — 不一致は
+// offset 破綻・空ページの原因になる（最重要）。JOIN は 1 つの共有定数に集約し、片方だけ
+// 書き換わって発散する余地を消す。LEFT JOIN は全て 1:1（主キー結合）で COUNT を変えない。
+const FEED_FROM_JOIN =
   "FROM feed_entries fe JOIN articles a ON a.id = fe.article_id " +
+  "LEFT JOIN interest_axes ax ON ax.axis_id = a.hit_axis " +
   "LEFT JOIN summaries s ON s.article_id = fe.article_id " +
-  "LEFT JOIN article_vote av ON av.article_id = fe.article_id " +
-  "WHERE fe.date = ? ORDER BY fe.rank LIMIT ? OFFSET ?";
+  "LEFT JOIN article_vote av ON av.article_id = fe.article_id";
 
-// その日の総件数。総ページ数・現在位置・前後リンクの有無を決めるのに使う。
-const COUNT_SQL =
-  "SELECT COUNT(*) AS total FROM feed_entries WHERE date = ?";
-
-// カテゴリ指定時の JOIN 版。hit_axis→interest_axes を LEFT JOIN して category を引く。
-// ENTRIES と COUNT に同一の FROM/JOIN/WHERE 述語を適用する — 不一致は offset 破綻・
-// 空ページの原因になる（最重要）。FROM/JOIN は 1 つの共有定数に集約し、片方だけ
-// 書き換わって発散する余地を消す（列は非フィルタ版と同一で EntryRow を満たす）。
-const FILTERED_FROM_JOIN =
-  "FROM feed_entries fe JOIN articles a ON a.id = fe.article_id " +
-  "LEFT JOIN interest_axes ax ON ax.axis_id = a.hit_axis";
-
-const ENTRIES_SQL_FILTERED_HEAD =
+// entries の取得列。要約は summaries に分離済み（1 記事 1 行）で、行が無ければ summary は NULL。
+const ENTRIES_SELECT =
   "SELECT fe.id AS feed_entry_id, fe.rank AS rank, s.text AS summary, " +
   "a.title AS title, a.source AS source, a.published_at AS published_at, " +
-  "a.url AS url, a.hit_axis AS hit_axis, av.vote AS vote " +
-  FILTERED_FROM_JOIN +
-  " LEFT JOIN summaries s ON s.article_id = fe.article_id " +
-  "LEFT JOIN article_vote av ON av.article_id = fe.article_id " +
-  "WHERE fe.date = ? ";
-const ENTRIES_SQL_FILTERED_TAIL = " ORDER BY fe.rank LIMIT ? OFFSET ?";
+  "a.url AS url, a.hit_axis AS hit_axis, av.vote AS vote ";
 
-const COUNT_SQL_FILTERED_HEAD =
-  "SELECT COUNT(*) AS total " + FILTERED_FROM_JOIN + " WHERE fe.date = ? ";
+const ENTRIES_SQL_TAIL = " ORDER BY fe.rank LIMIT ? OFFSET ?";
 
 const TRENDS_SQL_FILTERED_HEAD =
   "SELECT ft.axis_id AS axis_id, ft.hit_count AS hit_count, " +
@@ -89,12 +72,14 @@ function parseCategoryFilter(category: string | null): CategoryFilter {
 
 /**
  * カテゴリ絞り込みの WHERE 追加述語。ENTRIES と COUNT の両方が共有し、両者の述語一致
- * （offset 整合の要）をこの 1 箇所で保証する。trends は hit_axis 列が無いので別述語。
+ * （offset 整合の要）をこの 1 箇所で保証する。all は絞らないので空文字。
+ * trends は hit_axis 列が無いので別述語。
  */
-function entriesPredicate(filter: CategoryFilter): string {
-  return filter.mode === "named"
-    ? "AND ax.category = ?"
-    : "AND (a.hit_axis IS NULL OR ax.category IS NULL)";
+function categoryPredicate(filter: CategoryFilter): string {
+  if (filter.mode === "named") return "AND ax.category = ?";
+  if (filter.mode === "uncat")
+    return "AND (a.hit_axis IS NULL OR ax.category IS NULL)";
+  return "";
 }
 
 interface EntryRow {
@@ -366,35 +351,38 @@ export async function renderFeedPage(
   return htmlResponse(page("フィード", body));
 }
 
-/** entries クエリを組む。all は現行 SQL のまま、フィルタ時のみ JOIN 版に分岐する。 */
+/**
+ * entries クエリを組む。all/named/uncat を共有 FROM/JOIN + categoryPredicate の単一
+ * ビルダに集約する。named のみ category を bind する（bind 順序: date,[category],limit,offset）。
+ */
 function buildEntriesStmt(
   env: Env,
   date: string,
   filter: CategoryFilter,
   offset: number,
 ): D1PreparedStatement {
-  if (filter.mode === "all") {
-    return env.DB.prepare(ENTRIES_SQL).bind(date, PAGE_SIZE, offset);
-  }
   const sql =
-    ENTRIES_SQL_FILTERED_HEAD +
-    entriesPredicate(filter) +
-    ENTRIES_SQL_FILTERED_TAIL;
+    ENTRIES_SELECT +
+    FEED_FROM_JOIN +
+    " WHERE fe.date = ? " +
+    categoryPredicate(filter) +
+    ENTRIES_SQL_TAIL;
   return filter.mode === "named"
     ? env.DB.prepare(sql).bind(date, filter.category, PAGE_SIZE, offset)
     : env.DB.prepare(sql).bind(date, PAGE_SIZE, offset);
 }
 
-/** COUNT クエリを組む。entries と同一の JOIN/WHERE 述語で数える（offset 整合の要）。 */
+/** COUNT クエリを組む。entries と同一の FROM/JOIN/WHERE 述語で数える（offset 整合の要）。 */
 function buildCountStmt(
   env: Env,
   date: string,
   filter: CategoryFilter,
 ): D1PreparedStatement {
-  if (filter.mode === "all") {
-    return env.DB.prepare(COUNT_SQL).bind(date);
-  }
-  const sql = COUNT_SQL_FILTERED_HEAD + entriesPredicate(filter);
+  const sql =
+    "SELECT COUNT(*) AS total " +
+    FEED_FROM_JOIN +
+    " WHERE fe.date = ? " +
+    categoryPredicate(filter);
   return filter.mode === "named"
     ? env.DB.prepare(sql).bind(date, filter.category)
     : env.DB.prepare(sql).bind(date);
