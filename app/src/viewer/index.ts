@@ -82,6 +82,31 @@ function categoryPredicate(filter: CategoryFilter): string {
   return "";
 }
 
+/**
+ * 本文フィルタのモード。with は本文要約フィード（要約あり）、without は本文なしフィード
+ * （要約なし）。フィードを要約の有無で 2 分割し、両方にアクセスできるようにする。
+ */
+type BodyFilter = { mode: "with" } | { mode: "without" };
+
+/**
+ * `?body` の生値をフィルタへ解釈する。`"without"` のみ本文なし、それ以外（null 含む）は
+ * 本文要約を既定とする（フィードを開いた既定は要約あり）。
+ */
+function parseBodyFilter(body: string | null): BodyFilter {
+  return body === "without" ? { mode: "without" } : { mode: "with" };
+}
+
+/**
+ * 本文有無の WHERE 追加述語。ENTRIES と COUNT の両方が共有する（offset 整合の要）。
+ * summaries 行の有無で判定し、bind プレースホルダを持たないリテラルなので bind 順序に
+ * 影響しない。既定 with が全リクエストに常時付く。
+ */
+function bodyPredicate(filter: BodyFilter): string {
+  return filter.mode === "with"
+    ? "AND s.article_id IS NOT NULL"
+    : "AND s.article_id IS NULL";
+}
+
 interface EntryRow {
   feed_entry_id: number;
   rank: number;
@@ -234,36 +259,66 @@ function renderPagination(
 function renderCategoryNav(
   categories: string[],
   filter: CategoryFilter,
+  body: BodyFilter,
 ): string {
   const item = (label: string, href: string, active: boolean): string =>
     active
       ? `<strong>${escapeHtml(label)}</strong>`
       : `<a href="${href}">${escapeHtml(label)}</a>`;
 
-  const parts = [item("すべて", "/", filter.mode === "all")];
+  const parts = [
+    item("すべて", feedHref({ mode: "all" }, body), filter.mode === "all"),
+  ];
   for (const c of categories) {
     parts.push(
       item(
         c,
-        `/?category=${encodeURIComponent(c)}`,
+        feedHref({ mode: "named", category: c }, body),
         filter.mode === "named" && filter.category === c,
       ),
     );
   }
   parts.push(
-    item("未分類", `/?category=${UNCATEGORIZED}`, filter.mode === "uncat"),
+    item("未分類", feedHref({ mode: "uncat" }, body), filter.mode === "uncat"),
   );
   return `<nav class="categories">${parts.join(" ")}</nav>`;
 }
 
-/** ページネーション/ナビ用に現在のカテゴリを保持する page href を作る。 */
-function pageHrefFor(filter: CategoryFilter): (page: number) => string {
-  if (filter.mode === "all") return (p) => `/?page=${p}`;
-  if (filter.mode === "named") {
-    const c = encodeURIComponent(filter.category);
-    return (p) => `/?category=${c}&page=${p}`;
-  }
-  return (p) => `/?category=${UNCATEGORIZED}&page=${p}`;
+/**
+ * 本文フィルタ切替ナビ。[本文要約][本文なし] を素のリンクで並べ、現在の category を保持し、
+ * 選択中だけリンクにせず `<strong>` で現在地を示す（JS 不要）。renderCategoryNav と並べる。
+ */
+function renderBodyNav(filter: CategoryFilter, body: BodyFilter): string {
+  const item = (label: string, mode: BodyFilter["mode"]): string =>
+    body.mode === mode
+      ? `<strong>${escapeHtml(label)}</strong>`
+      : `<a href="${feedHref(filter, { mode })}">${escapeHtml(label)}</a>`;
+  return (
+    `<nav class="bodies">` +
+    item("本文要約", "with") +
+    " " +
+    item("本文なし", "without") +
+    `</nav>`
+  );
+}
+
+/**
+ * フィード href を組む単一ヘルパ。パラメータ順は category→body→page 固定で、既定値
+ * （category=all・body=with・page 省略）は出さない。ナビとページネーションが共有し、
+ * 現在のフィルタ状態をリンク間で保持する。href 値は encodeURIComponent でエスケープする。
+ */
+function feedHref(
+  filter: CategoryFilter,
+  body: BodyFilter,
+  page?: number,
+): string {
+  const params: string[] = [];
+  if (filter.mode === "named")
+    params.push(`category=${encodeURIComponent(filter.category)}`);
+  else if (filter.mode === "uncat") params.push(`category=${UNCATEGORIZED}`);
+  if (body.mode === "without") params.push("body=without");
+  if (page !== undefined) params.push(`page=${page}`);
+  return params.length === 0 ? "/" : `/?${params.join("&")}`;
 }
 
 /**
@@ -287,11 +342,14 @@ function voteButton(
  * 最新フィードを 1 ページ分レンダリングする。page は範囲外を 1..総ページ数 に丸める。
  * `category` は `?category` の生値: null/空は「すべて」（現行 SQL を変えない）、
  * センチネルは「未分類」、それ以外はカテゴリ名で単一選択フィルタする。
+ * `body` は `?body` の生値: `"without"` は本文なしフィード、それ以外（null 含む）は
+ * 本文要約フィードを既定とする。
  */
 export async function renderFeedPage(
   env: Env,
   pageNumber: number,
   category: string | null = null,
+  body: string | null = null,
 ): Promise<Response> {
   const latest = await env.DB.prepare(MAX_DATE_SQL).first<{
     date: string | null;
@@ -316,11 +374,12 @@ export async function renderFeedPage(
   ];
 
   const filter = parseCategoryFilter(category);
+  const bodyFilter = parseBodyFilter(body);
 
   const trendRows =
     (await buildTrendsStmt(env, date, filter).all<TrendRow>()).results ?? [];
 
-  const countRow = await buildCountStmt(env, date, filter).first<{
+  const countRow = await buildCountStmt(env, date, filter, bodyFilter).first<{
     total: number;
   }>();
   const total = countRow?.total ?? 0;
@@ -333,22 +392,31 @@ export async function renderFeedPage(
   const offset = (current - 1) * PAGE_SIZE;
   const entries =
     (
-      await buildEntriesStmt(env, date, filter, offset).all<EntryRow>()
+      await buildEntriesStmt(
+        env,
+        date,
+        filter,
+        bodyFilter,
+        offset,
+      ).all<EntryRow>()
     ).results ?? [];
 
   const list = entries.map((e) => renderEntry(e, labels)).join("");
 
-  const body =
+  const pageBody =
     `<h1>フィード <span class="meta">${escapeHtml(date)}</span></h1>` +
     `<p><a href="/settings">設定</a></p>` +
-    renderCategoryNav(categories, filter) +
+    renderCategoryNav(categories, filter, bodyFilter) +
+    renderBodyNav(filter, bodyFilter) +
     renderTrends(trendRows, labels) +
     `<h2>記事</h2><ul class="entries">${list}</ul>` +
-    renderPagination(current, totalPages, total, pageHrefFor(filter)) +
+    renderPagination(current, totalPages, total, (p) =>
+      feedHref(filter, bodyFilter, p),
+    ) +
     `<style>${FEEDBACK_STYLE}</style>` +
     `<script>${FEEDBACK_SCRIPT}</script>`;
 
-  return htmlResponse(page("フィード", body));
+  return htmlResponse(page("フィード", pageBody));
 }
 
 /**
@@ -359,12 +427,15 @@ function buildEntriesStmt(
   env: Env,
   date: string,
   filter: CategoryFilter,
+  body: BodyFilter,
   offset: number,
 ): D1PreparedStatement {
   const sql =
     ENTRIES_SELECT +
     FEED_FROM_JOIN +
     " WHERE fe.date = ? " +
+    bodyPredicate(body) +
+    " " +
     categoryPredicate(filter) +
     ENTRIES_SQL_TAIL;
   return filter.mode === "named"
@@ -377,11 +448,14 @@ function buildCountStmt(
   env: Env,
   date: string,
   filter: CategoryFilter,
+  body: BodyFilter,
 ): D1PreparedStatement {
   const sql =
     "SELECT COUNT(*) AS total " +
     FEED_FROM_JOIN +
     " WHERE fe.date = ? " +
+    bodyPredicate(body) +
+    " " +
     categoryPredicate(filter);
   return filter.mode === "named"
     ? env.DB.prepare(sql).bind(date, filter.category)
