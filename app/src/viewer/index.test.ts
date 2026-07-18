@@ -89,6 +89,22 @@ function makeEnv(opts: {
         ? trendCat(t) === m.cat
         : trendCat(t) === null;
 
+  // body 述語: with は要約あり(s.article_id IS NOT NULL→summary!=null)、
+  // without は要約なし(IS NULL→summary==null)。entries/COUNT に同一適用（offset 整合）。
+  // trends には s.article_id が無いので null（body 非対応）。
+  const bodyOf = (s: string): "with" | "without" | null =>
+    /s\.article_id IS NOT NULL/.test(s)
+      ? "with"
+      : /s\.article_id IS NULL/.test(s)
+        ? "without"
+        : null;
+  const keepBody = (e: EntryRow, b: "with" | "without" | null): boolean =>
+    b === "with"
+      ? e.summary !== null
+      : b === "without"
+        ? e.summary === null
+        : true;
+
   const db = {
     prepare(sql: string) {
       const s = sql.replace(/\s+/g, " ").trim();
@@ -105,7 +121,10 @@ function makeEnv(opts: {
           if (s.includes("COUNT(*)")) {
             // COUNT は ENTRIES と同一述語で数える（offset 破綻・空ページ防止）。
             const m = modeOf(s, this._args);
-            const total = entries.filter((e) => keepEntry(e, m)).length;
+            const b = bodyOf(s);
+            const total = entries.filter(
+              (e) => keepEntry(e, m) && keepBody(e, b),
+            ).length;
             return { total } as unknown as T;
           }
           return null;
@@ -132,11 +151,15 @@ function makeEnv(opts: {
             return { results: rows as unknown as T[], success: true, meta: {} };
           }
           // entries: all/uncat は bind(date, limit, offset)、named は bind(date, cat, limit, offset)。
+          // body 述語はリテラルなので bind 順序に影響しない。
           const m = modeOf(s, this._args);
+          const b = bodyOf(s);
           const limitIdx = m.kind === "named" ? 2 : 1;
           const limit = this._args[limitIdx] as number;
           const offset = this._args[limitIdx + 1] as number;
-          const filtered = entries.filter((e) => keepEntry(e, m));
+          const filtered = entries.filter(
+            (e) => keepEntry(e, m) && keepBody(e, b),
+          );
           const slice = filtered.slice(offset, offset + limit);
           return { results: slice as unknown as T[], success: true, meta: {} };
         },
@@ -154,7 +177,9 @@ function entryRow(over: Partial<EntryRow> = {}): EntryRow {
   return {
     feed_entry_id: over.rank ?? 1,
     rank: 1,
-    summary: null,
+    // 既定フィード（本文要約=with）で行が残るよう、既定で非 null 要約を持たせる。
+    // 「要約なし」を試すケースは summary:null を明示する。
+    summary: "SUMMARY",
     title: "title",
     source: "hn",
     published_at: "2026-07-08T00:00:00.000Z",
@@ -202,20 +227,6 @@ describe("renderFeedPage", () => {
     expect(html.indexOf("FIRST")).toBeLessThan(html.indexOf("SECOND"));
     expect(html).toContain('href="/r/10"');
     expect(html).toContain('href="/r/20"');
-  });
-
-  it("omits the summary line when summary is null", async () => {
-    const env = makeEnv({
-      maxDate: "2026-07-08",
-      entries: [
-        entryRow({ rank: 1, feed_entry_id: 1, summary: "HAS_SUMMARY" }),
-        entryRow({ rank: 2, feed_entry_id: 2, summary: null }),
-      ],
-    });
-    const html = await (await renderFeedPage(env, 1)).text();
-    expect(html).toContain("HAS_SUMMARY");
-    // summary 行は非 null の 1 件だけ
-    expect((html.match(/class="summary"/g) ?? []).length).toBe(1);
   });
 
   it("renders a structured summary as labelled sections", async () => {
@@ -514,6 +525,124 @@ describe("renderFeedPage", () => {
       expect(html).toContain("全5件");
       expect(html).toContain('href="/r/1"');
       expect(html).toContain('href="/r/4"');
+    });
+  });
+
+  describe("body filter", () => {
+    const enc = encodeURIComponent;
+
+    // ai/web=技術 のカテゴリ付き config（category×body 合成の検証用）。
+    function categorizedConfig(): Config {
+      return {
+        ...baseConfig(),
+        interestAxes: [
+          { id: "ai", label: "AI", category: "技術" },
+          { id: "web", label: "Web", category: "技術" },
+          { id: "life", label: "暮らし", category: "生活" },
+        ],
+      };
+    }
+
+    // 要約あり×2(id1,3) / 要約なし×2(id2,4)。既定=with は要約あり、without は要約なしだけ。
+    const withAndWithout = [
+      entryRow({ rank: 1, feed_entry_id: 1, summary: "S1" }),
+      entryRow({ rank: 2, feed_entry_id: 2, summary: null }),
+      entryRow({ rank: 3, feed_entry_id: 3, summary: "S3" }),
+      entryRow({ rank: 4, feed_entry_id: 4, summary: null }),
+    ];
+
+    it("(a) defaults to the with-body feed: only summarized entries, none without", async () => {
+      const env = makeEnv({ maxDate: "2026-07-08", entries: withAndWithout });
+      const html = await (await renderFeedPage(env, 1)).text();
+      expect(html).toContain('href="/r/1"');
+      expect(html).toContain('href="/r/3"');
+      expect(html).not.toContain('href="/r/2"');
+      expect(html).not.toContain('href="/r/4"');
+      // COUNT も with 述語なので総件数は 2（要約ありのみ）。
+      expect(html).toContain("全2件");
+    });
+
+    it("(b) body=without shows only entries without a summary and hides summarized ones", async () => {
+      const env = makeEnv({ maxDate: "2026-07-08", entries: withAndWithout });
+      const html = await (await renderFeedPage(env, 1, null, "without")).text();
+      expect(html).toContain('href="/r/2"');
+      expect(html).toContain('href="/r/4"');
+      expect(html).not.toContain('href="/r/1"');
+      expect(html).not.toContain('href="/r/3"');
+      expect(html).toContain("全2件");
+      // 本文なしフィードなので要約行は一切出ない。
+      expect(html).not.toContain('class="summary"');
+    });
+
+    it("(c) keeps COUNT and entries under the same without predicate across pages", async () => {
+      // 要約なし×25 と、without には出ない要約あり×3 を混ぜる。
+      const entries = [
+        ...Array.from({ length: 25 }, (_, i) =>
+          entryRow({ rank: i + 1, feed_entry_id: i + 1, summary: null }),
+        ),
+        ...Array.from({ length: 3 }, (_, i) =>
+          entryRow({ rank: 100 + i, feed_entry_id: 100 + i, summary: "S" }),
+        ),
+      ];
+      const env = makeEnv({ maxDate: "2026-07-08", entries });
+      const html = await (await renderFeedPage(env, 2, null, "without")).text();
+      // 総件数は without の 25 件のみ（要約ありは数えない）。
+      expect(html).toContain("全25件");
+      expect(html).toContain("2 / 2");
+      // page 2 は 21..25。offset 整合で id21 は出て id1 は出ない。
+      expect(html).toContain('href="/r/21"');
+      expect(html).not.toContain('href="/r/1"');
+    });
+
+    it("(d) composes category and body filters together", async () => {
+      const entries = [
+        entryRow({ rank: 1, feed_entry_id: 1, hit_axis: "ai", summary: "S" }),
+        entryRow({ rank: 2, feed_entry_id: 2, hit_axis: "web", summary: null }),
+        entryRow({ rank: 3, feed_entry_id: 3, hit_axis: "life", summary: "S" }),
+      ];
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries,
+        config: categorizedConfig(),
+      });
+      const html = await (await renderFeedPage(env, 1, "技術", "with")).text();
+      // 技術かつ要約あり = id1 のみ。id2(技術だが要約なし)・id3(要約ありだが生活)は除外。
+      expect(html).toContain('href="/r/1"');
+      expect(html).not.toContain('href="/r/2"');
+      expect(html).not.toContain('href="/r/3"');
+      expect(html).toContain("全1件");
+    });
+
+    it("(e) preserves category and body in pagination links (order category→body→page)", async () => {
+      const entries = Array.from({ length: 25 }, (_, i) =>
+        entryRow({
+          rank: i + 1,
+          feed_entry_id: i + 1,
+          hit_axis: "ai",
+          summary: null,
+        }),
+      );
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries,
+        config: categorizedConfig(),
+      });
+      const html = await (await renderFeedPage(env, 1, "技術", "without")).text();
+      expect(html).toContain(`href="/?category=${enc("技術")}&body=without&page=2"`);
+      expect(html).toContain("全25件");
+    });
+
+    it("(f) renders a body toggle nav that preserves the category and marks the active one", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: withAndWithout,
+        config: categorizedConfig(),
+      });
+      const html = await (await renderFeedPage(env, 1, "技術", "without")).text();
+      // 選択中(本文なし)は strong、非選択(本文要約)は現在 category を保持したリンク。
+      expect(html).toContain("<strong>本文なし</strong>");
+      expect(html).toContain("本文要約");
+      expect(html).toContain(`href="/?category=${enc("技術")}"`);
     });
   });
 });
