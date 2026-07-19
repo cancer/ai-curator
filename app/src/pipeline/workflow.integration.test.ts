@@ -68,6 +68,7 @@ describe("DailyPass — step graph", () => {
       "axis-sync",
       "score",
       "summarize",
+      "relevance-gate",
       "trends",
     ]);
     // Every step declares the retry config.
