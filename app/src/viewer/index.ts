@@ -11,6 +11,7 @@ import type { Env } from "../index";
 import { loadConfig } from "../config";
 import { escapeHtml, page, htmlResponse } from "./layout";
 import { decodeSummary, SUMMARY_SECTIONS } from "../lib/summarize";
+import { toJstFeedDateLabel, formatJstPublishedAt } from "./datetime";
 
 const PAGE_SIZE = 20;
 
@@ -218,7 +219,7 @@ function renderEntry(entry: EntryRow, labels: Map<string, string>): string {
     `<span class="rank">#${entry.rank}</span>` +
     `<a href="/r/${entry.feed_entry_id}">${escapeHtml(entry.title)}</a>` +
     `<div class="meta">${escapeHtml(entry.source)}・` +
-    `${escapeHtml(entry.published_at)}${axisLabel}</div>` +
+    `${escapeHtml(formatJstPublishedAt(entry.published_at))}${axisLabel}</div>` +
     `<div class="meta">出典: <a href="${url}">${url}</a></div>` +
     summary +
     `<div>` +
@@ -404,7 +405,7 @@ export async function renderFeedPage(
   const list = entries.map((e) => renderEntry(e, labels)).join("");
 
   const pageBody =
-    `<h1>フィード <span class="meta">${escapeHtml(date)}</span></h1>` +
+    `<h1>フィード <span class="meta">${escapeHtml(toJstFeedDateLabel(date))}</span></h1>` +
     `<p><a href="/settings">設定</a></p>` +
     renderCategoryNav(categories, filter, bodyFilter) +
     renderBodyNav(filter, bodyFilter) +
