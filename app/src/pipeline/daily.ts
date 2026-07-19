@@ -708,6 +708,9 @@ export async function gateAxisRelevance(
     }
   }
 
+  console.log(
+    `relevance-gate: judged=${judged} irrelevant=${irrelevant} failed=${judgeFailed}`,
+  );
   return { judged, irrelevant, judgeFailed };
 }
 
