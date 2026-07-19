@@ -45,9 +45,11 @@ import { clusterArticles, type DedupArticle } from "../lib/semantic_dedup";
 import {
   summarizeEntries,
   summarizeTrend,
+  decodeSummary,
   type SummaryTarget,
   type DigestMetric,
 } from "../lib/summarize";
+import { judgeAxisRelevance } from "../lib/relevance";
 import { fetchFeed, resolveArticleBody, MIN_BODY_CHARS } from "../adapters/feed";
 
 /** embedding 呼び出しの間隔（レート制御）。 */
@@ -170,6 +172,21 @@ async function recordDigestMetric(
     );
   }
 }
+
+/**
+ * 関心軸ゲート判定の対象（当日掲載のうち、軸マッチ済み・未判定・要約ありの記事）。
+ * 軸ラベルは interest_axes.label（a.hit_axis = interest_axes.axis_id で JOIN）。
+ * ENTRIES_FOR_DATE_SQL と同じ「LEFT JOIN ではなく対象条件で絞る」様式だが、こちらは
+ * axis_relevant IS NULL で絞ることで step 再実行時に未判定分だけを処理する（冪等）。
+ */
+const GATE_TARGETS_SQL =
+  "SELECT a.id AS article_id, a.title AS title, s.text AS summary_text, " +
+  "ia.label AS axis_label FROM feed_entries fe " +
+  "JOIN articles a ON a.id = fe.article_id " +
+  "JOIN summaries s ON s.article_id = a.id " +
+  "JOIN interest_axes ia ON ia.axis_id = a.hit_axis " +
+  "WHERE fe.date = ? AND a.hit_axis IS NOT NULL AND a.axis_relevant IS NULL " +
+  "AND s.text IS NOT NULL ORDER BY fe.rank";
 
 /** 当日フィードの hit_axis と title（傾向段の集計元。どちらもメタ）。 */
 const TREND_SOURCE_SQL =
@@ -592,6 +609,101 @@ export async function summarizeFeed(
   );
 
   return { summarized: summaries.size, summaryFailed: failed };
+}
+
+/** 関心軸ゲート判定フェーズの結果（件数のみ）。 */
+export interface GateResult {
+  judged: number;
+  irrelevant: number;
+  judgeFailed: number;
+}
+
+export interface GateDeps {
+  judge?: typeof judgeAxisRelevance;
+  sleep?: Sleep;
+}
+
+/**
+ * decodeSummary の復元結果を judge へ渡す平文にする。構造化できていれば
+ * overview/thesis/conclusion（想定対象読者は軸判定に不要なので含めない）を結合し、
+ * raw ならそのまま使う。
+ */
+function summaryPlaintext(
+  decoded: ReturnType<typeof decodeSummary>,
+): string {
+  if ("sections" in decoded) {
+    const { overview, thesis, conclusion } = decoded.sections;
+    return [overview, thesis, conclusion].join("\n");
+  }
+  return decoded.raw;
+}
+
+/**
+ * 当日掲載のうち軸マッチ済み・未判定の記事を LLM ゲートにかけ、`articles.axis_relevant`
+ * に該当(1)/非該当(0)を即時 UPDATE する（1 件ごとに永続化 = 部分進捗を残す）。
+ * axis_relevant IS NULL の行だけを対象にするので step 再実行に対して冪等。
+ *
+ * 既知の制約: hit_axis が変わっても axis_relevant は巻き戻さない（別軸へ再マッチした
+ * 記事は、旧軸判定の axis_relevant がそのまま残る）。
+ *
+ * 1 件の判定失敗は warn して続行し、judgeFailed に計上する。axis_relevant は NULL の
+ * まま（fail-open = 掲載扱い）。
+ */
+export async function gateAxisRelevance(
+  db: D1Database,
+  ai: Ai,
+  digest: DigestConfig,
+  date: string,
+  deps: GateDeps = {},
+): Promise<GateResult> {
+  const judge = deps.judge ?? judgeAxisRelevance;
+
+  const rows =
+    (
+      await db
+        .prepare(GATE_TARGETS_SQL)
+        .bind(date)
+        .all<{
+          article_id: number;
+          title: string;
+          summary_text: string;
+          axis_label: string;
+        }>()
+    ).results ?? [];
+
+  let judged = 0;
+  let irrelevant = 0;
+  let judgeFailed = 0;
+
+  for (const row of rows) {
+    const plaintext = summaryPlaintext(decodeSummary(row.summary_text));
+    try {
+      const relevant = await judge(
+        ai,
+        digest,
+        row.axis_label,
+        row.title,
+        plaintext,
+        deps.sleep,
+        (metric) => recordDigestMetric(db, metric),
+      );
+      await db
+        .prepare("UPDATE articles SET axis_relevant = ? WHERE id = ?")
+        .bind(relevant ? 1 : 0, row.article_id)
+        .run();
+      judged += 1;
+      if (!relevant) irrelevant += 1;
+    } catch (err) {
+      judgeFailed += 1;
+      console.warn(
+        `daily: relevance gate failed for article ${row.article_id}; ` +
+          `leaving axis_relevant NULL (fail-open): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  return { judged, irrelevant, judgeFailed };
 }
 
 /** trends フェーズの結果（件数のみ）。 */
