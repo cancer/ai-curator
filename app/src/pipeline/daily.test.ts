@@ -945,6 +945,28 @@ describe("buildTrends", () => {
     { id: "web", label: "Web" },
   ];
 
+  it("excludes axis_relevant=0 (gated non-relevant) articles from the trend source query", async () => {
+    // The exclusion happens in the SQL WHERE clause (not JS-side filtering), so this
+    // asserts on the prepared statement text itself — the only place the behavior lives.
+    const preparedSql: string[] = [];
+    const { db } = makeReadDb({ trendRows: [] });
+    const realPrepare = db.prepare.bind(db);
+    (db as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      preparedSql.push(sql);
+      return realPrepare(sql);
+    };
+
+    await buildTrends(db, ai(vi.fn()), DIGEST, axesConfig, "2026-07-08", {
+      sleep: noSleep,
+    });
+
+    const trendSourceSql = preparedSql.find((sql) =>
+      sql.includes("hit_axis AS hit_axis"),
+    );
+    expect(trendSourceSql).toBeDefined();
+    expect(trendSourceSql).toMatch(/axis_relevant IS NULL OR .*axis_relevant != 0/);
+  });
+
   it("counts per axis and inserts trends (delete-first)", async () => {
     const trendRows: TrendRow[] = [
       { hit_axis: "ai", title: "a1" },

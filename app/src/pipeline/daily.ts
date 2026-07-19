@@ -188,10 +188,15 @@ const GATE_TARGETS_SQL =
   "WHERE fe.date = ? AND a.hit_axis IS NOT NULL AND a.axis_relevant IS NULL " +
   "AND s.text IS NOT NULL ORDER BY fe.rank";
 
-/** 当日フィードの hit_axis と title（傾向段の集計元。どちらもメタ）。 */
+/**
+ * 当日フィードの hit_axis と title（傾向段の集計元。どちらもメタ）。
+ * axis_relevant = 0（ゲートで非該当と判定済み）の記事は軸集計・傾向叙述の入力から除外する。
+ * NULL（未判定）は fail-open で残す。
+ */
 const TREND_SOURCE_SQL =
   "SELECT a.hit_axis AS hit_axis, a.title AS title FROM feed_entries fe " +
-  "JOIN articles a ON a.id = fe.article_id WHERE fe.date = ? ORDER BY fe.rank";
+  "JOIN articles a ON a.id = fe.article_id WHERE fe.date = ? " +
+  "AND (a.axis_relevant IS NULL OR a.axis_relevant != 0) ORDER BY fe.rank";
 
 interface ArticleRow {
   id: number;
