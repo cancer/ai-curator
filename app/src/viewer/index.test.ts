@@ -273,6 +273,26 @@ describe("renderFeedPage", () => {
     expect(html).toContain("https://example.invalid/primary");
   });
 
+  it("displays the feed date heading and published_at in JST", async () => {
+    const env = makeEnv({
+      maxDate: "2026-07-08",
+      entries: [
+        entryRow({
+          rank: 1,
+          feed_entry_id: 1,
+          published_at: "2026-07-08T00:00:00.000Z",
+        }),
+      ],
+    });
+    const html = await (await renderFeedPage(env, 1)).text();
+    // 見出しの date キー(UTC)は cron 実行時刻の瞬間として JST 暦日 D+1 に繰り上がる。
+    expect(html).toContain("2026-07-09");
+    // published_at は JST の YYYY-MM-DD HH:mm（00:00 UTC → 09:00 JST）。
+    expect(html).toContain("2026-07-08 09:00");
+    // 生の UTC ISO はそのまま出さない。
+    expect(html).not.toContain("2026-07-08T00:00:00.000Z");
+  });
+
   it("escapes title, narrative and url to prevent XSS", async () => {
     const env = makeEnv({
       maxDate: "2026-07-08",
