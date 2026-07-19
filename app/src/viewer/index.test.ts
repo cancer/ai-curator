@@ -13,6 +13,9 @@ interface EntryRow {
   url: string;
   hit_axis: string | null;
   vote: string | null;
+  // ゲート判定。既定は 1（該当）。0=非該当（gate=excluded 側にのみ出る）、
+  // null=未判定（fail-open で in 側に出る）。
+  axis_relevant?: number | null;
 }
 
 interface TrendRow {
@@ -105,6 +108,15 @@ function makeEnv(opts: {
         ? e.summary === null
         : true;
 
+  // gate 述語: in は axis_relevant IS NULL OR = 1（fail-open で掲載）、
+  // excluded は axis_relevant = 0 のみ。リテラルなので bind 順序に影響しない。
+  const gateOf = (s: string): "in" | "excluded" =>
+    /a\.axis_relevant = 0/.test(s) ? "excluded" : "in";
+  const keepGate = (e: EntryRow, g: "in" | "excluded"): boolean => {
+    const relevant = e.axis_relevant ?? 1;
+    return g === "excluded" ? relevant === 0 : relevant === null || relevant === 1;
+  };
+
   const db = {
     prepare(sql: string) {
       const s = sql.replace(/\s+/g, " ").trim();
@@ -122,8 +134,9 @@ function makeEnv(opts: {
             // COUNT は ENTRIES と同一述語で数える（offset 破綻・空ページ防止）。
             const m = modeOf(s, this._args);
             const b = bodyOf(s);
+            const g = gateOf(s);
             const total = entries.filter(
-              (e) => keepEntry(e, m) && keepBody(e, b),
+              (e) => keepEntry(e, m) && keepBody(e, b) && keepGate(e, g),
             ).length;
             return { total } as unknown as T;
           }
@@ -154,11 +167,12 @@ function makeEnv(opts: {
           // body 述語はリテラルなので bind 順序に影響しない。
           const m = modeOf(s, this._args);
           const b = bodyOf(s);
+          const g = gateOf(s);
           const limitIdx = m.kind === "named" ? 2 : 1;
           const limit = this._args[limitIdx] as number;
           const offset = this._args[limitIdx + 1] as number;
           const filtered = entries.filter(
-            (e) => keepEntry(e, m) && keepBody(e, b),
+            (e) => keepEntry(e, m) && keepBody(e, b) && keepGate(e, g),
           );
           const slice = filtered.slice(offset, offset + limit);
           return { results: slice as unknown as T[], success: true, meta: {} };
@@ -663,6 +677,105 @@ describe("renderFeedPage", () => {
       expect(html).toContain("<strong>本文なし</strong>");
       expect(html).toContain("本文要約");
       expect(html).toContain(`href="/?category=${enc("技術")}"`);
+    });
+  });
+
+  describe("gate filter", () => {
+    // relevant=1×2(id1,3) / not-relevant=0×1(id2) / 未判定=null×1(id4、fail-open で in 側)。
+    const gated = [
+      entryRow({ rank: 1, feed_entry_id: 1, axis_relevant: 1 }),
+      entryRow({ rank: 2, feed_entry_id: 2, axis_relevant: 0 }),
+      entryRow({ rank: 3, feed_entry_id: 3, axis_relevant: 1 }),
+      entryRow({ rank: 4, feed_entry_id: 4, axis_relevant: null }),
+    ];
+
+    it("(a) defaults to the in view: excludes axis_relevant=0, includes 1 and null (fail-open)", async () => {
+      const env = makeEnv({ maxDate: "2026-07-08", entries: gated });
+      const html = await (await renderFeedPage(env, 1)).text();
+      expect(html).toContain('href="/r/1"');
+      expect(html).toContain('href="/r/3"');
+      expect(html).toContain('href="/r/4"');
+      expect(html).not.toContain('href="/r/2"');
+      // COUNT も同一述語なので総件数は 3。
+      expect(html).toContain("全3件");
+    });
+
+    it("(b) ?gate=excluded shows only axis_relevant=0 entries", async () => {
+      const env = makeEnv({ maxDate: "2026-07-08", entries: gated });
+      const html = await (
+        await renderFeedPage(env, 1, null, null, "excluded")
+      ).text();
+      expect(html).toContain('href="/r/2"');
+      expect(html).not.toContain('href="/r/1"');
+      expect(html).not.toContain('href="/r/3"');
+      expect(html).not.toContain('href="/r/4"');
+      expect(html).toContain("全1件");
+    });
+
+    it("(c) feedHref orders params category→body→gate→page and omits the default gate=in", async () => {
+      const many = Array.from({ length: 25 }, (_, i) =>
+        entryRow({
+          rank: i + 1,
+          feed_entry_id: i + 1,
+          axis_relevant: 0,
+          summary: null,
+        }),
+      );
+      const env = makeEnv({ maxDate: "2026-07-08", entries: many });
+      const html = await (
+        await renderFeedPage(env, 1, null, "without", "excluded")
+      ).text();
+      expect(html).toContain('href="/?body=without&gate=excluded&page=2"');
+      // 既定 in は出さない。
+      const inDefault = await (
+        await renderFeedPage(env, 1, null, null, "in")
+      ).text();
+      expect(inDefault).not.toContain("gate=in");
+    });
+
+    it("(d) hides trends on the excluded view and shows them on the in view", async () => {
+      const env = makeEnv({
+        maxDate: "2026-07-08",
+        entries: gated,
+        trends: [{ axis_id: "ai", hit_count: 3, narrative: "AIが話題" }],
+      });
+      const excluded = await (
+        await renderFeedPage(env, 1, null, null, "excluded")
+      ).text();
+      expect(excluded).not.toContain("今日の傾向");
+      expect(excluded).not.toContain("AIが話題");
+
+      const inView = await (await renderFeedPage(env, 1)).text();
+      expect(inView).toContain("今日の傾向");
+      expect(inView).toContain("AIが話題");
+    });
+
+    it("(e) renders a gate toggle nav with 掲載/軸非該当 links, marking the active one", async () => {
+      const env = makeEnv({ maxDate: "2026-07-08", entries: gated });
+      const html = await (
+        await renderFeedPage(env, 1, null, null, "excluded")
+      ).text();
+      expect(html).toContain("<strong>軸非該当</strong>");
+      expect(html).toContain("掲載");
+      expect(html).toContain('href="/"');
+    });
+
+    it("(f) preserves gate=excluded when switching category or body filters", async () => {
+      const config = {
+        ...baseConfig(),
+        interestAxes: [{ id: "ai", label: "AI", category: "技術" }],
+      };
+      const env = makeEnv({ maxDate: "2026-07-08", entries: gated, config });
+      const html = await (
+        await renderFeedPage(env, 1, null, null, "excluded")
+      ).text();
+      // カテゴリ・本文ナビのリンクにも gate=excluded を保持する。
+      expect(html).toContain(`gate=excluded`);
+      const enc = encodeURIComponent;
+      expect(html).toContain(
+        `href="/?category=${enc("技術")}&gate=excluded"`,
+      );
+      expect(html).toContain(`href="/?body=without&gate=excluded"`);
     });
   });
 });
