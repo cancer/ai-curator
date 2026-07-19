@@ -7,7 +7,7 @@ import {
 } from "./summarize";
 import { sseStream } from "../../test/sse";
 import type { DigestMetric } from "./summarize";
-import { decodeSummary, parseStructuredSummary } from "./summarize";
+import { decodeSummary, encodeSummary, parseStructuredSummary } from "./summarize";
 
 interface RunArgs {
   messages: { role: string; content: string }[];
@@ -36,17 +36,27 @@ function mockAi(
 }
 
 describe("summarizeArticle", () => {
-  it("sends a system + user message and returns the trimmed response", async () => {
+  // メイン要約は system に「フェーズ1」、前提知識は「前提知識」を含むので、その有無で
+  // 2 回の呼び出しを区別する（実行順に依存しない）。
+  const articleCall = (calls: { model: string; options: RunArgs }[]) =>
+    calls.find((c) => c.options.messages[0].content.includes("フェーズ1"))!;
+  const backgroundCall = (calls: { model: string; options: RunArgs }[]) =>
+    calls.find((c) => c.options.messages[0].content.includes("前提知識"))!;
+
+  it("makes two calls (main summary + background) and returns the trimmed response", async () => {
     const { ai, calls } = mockAi(async () => "  これは要約です。  ");
 
     const result = await summarizeArticle(ai, "@cf/model", 300, "記事タイトル", "本文");
 
+    // メイン要約が 4 見出しでない → raw 保持、前提知識は破棄される。
     expect(decodeSummary(result)).toEqual({ raw: "これは要約です。" });
-    expect(calls).toHaveLength(1);
-    expect(calls[0].model).toBe("@cf/model");
-    expect(calls[0].options.max_tokens).toBe(300);
-    expect(calls[0].options.temperature).toBe(0);
-    const [system, user] = calls[0].options.messages;
+    // 要約本体＋前提知識で 2 回呼ぶ。
+    expect(calls).toHaveLength(2);
+    const article = articleCall(calls);
+    expect(article.model).toBe("@cf/model");
+    expect(article.options.max_tokens).toBe(300);
+    expect(article.options.temperature).toBe(0);
+    const [system, user] = article.options.messages;
     expect(system.role).toBe("system");
     expect(system.content).toContain("技術ニュースの編集者");
     expect(user.role).toBe("user");
@@ -54,24 +64,96 @@ describe("summarizeArticle", () => {
     expect(user.content).toContain("本文");
   });
 
-  it("truncates the body excerpt to 20,000 characters in the prompt", async () => {
+  it("merges the separately generated background into the stored summary", async () => {
+    const four = [
+      "・想定対象読者：エンジニア",
+      "・全体の要約：本文の主旨。",
+      "・著者の主張：主張X",
+      "・結論：結論Y",
+    ].join("\n");
+    const { ai } = mockAi(async (_m, options) =>
+      options.messages[0].content.includes("前提知識")
+        ? "分散システムの基礎知識。"
+        : four,
+    );
+
+    const result = await summarizeArticle(ai, "@cf/model", 4000, "t", "b");
+
+    expect(decodeSummary(result)).toEqual({
+      sections: {
+        audience: "エンジニア",
+        background: "分散システムの基礎知識。",
+        overview: "本文の主旨。",
+        claims: "主張X",
+        conclusion: "結論Y",
+      },
+    });
+  });
+
+  it("keeps the summary (background empty) when background generation fails", async () => {
+    const four = [
+      "・想定対象読者：エンジニア",
+      "・全体の要約：本文の主旨。",
+      "・著者の主張：主張X",
+      "・結論：結論Y",
+    ].join("\n");
+    const ai = {
+      run: (async (_m: string, options: RunArgs) => {
+        if (options.messages[0].content.includes("前提知識")) {
+          throw new Error("background LLM error");
+        }
+        return sseStream(four);
+      }) as unknown as Ai["run"],
+    } as Ai;
+    const noSleep = async () => {};
+
+    const result = await summarizeArticle(ai, "@cf/model", 4000, "t", "b", noSleep);
+
+    // 前提知識が全リトライ失敗しても要約本体は保存され、background だけ空になる。
+    expect(decodeSummary(result)).toEqual({
+      sections: {
+        audience: "エンジニア",
+        background: "",
+        overview: "本文の主旨。",
+        claims: "主張X",
+        conclusion: "結論Y",
+      },
+    });
+  });
+
+  it("truncates the main body excerpt to 20,000 characters in the prompt", async () => {
     const { ai, calls } = mockAi();
     const longBody = "あ".repeat(30000);
 
     await summarizeArticle(ai, "@cf/model", 300, "t", longBody);
 
-    const user = calls[0].options.messages[1].content;
-    // The prompt must not carry the full 30,000-char body.
+    const user = articleCall(calls).options.messages[1].content;
+    // The main prompt must not carry the full 30,000-char body.
     expect(user).toContain("あ".repeat(20000));
     expect(user).not.toContain("あ".repeat(20001));
   });
 
-  it("retries the AI call on a transient error and then succeeds", async () => {
-    let attempts = 0;
+  it("uses a shorter body excerpt for the background call to save tokens", async () => {
+    const { ai, calls } = mockAi();
+    const longBody = "あ".repeat(30000);
+
+    await summarizeArticle(ai, "@cf/model", 300, "t", longBody);
+
+    const user = backgroundCall(calls).options.messages[1].content;
+    // 前提知識はテーマ把握が目的で本文全体は不要 → メインより短い抜粋。
+    expect(user).toContain("あ".repeat(4000));
+    expect(user).not.toContain("あ".repeat(4001));
+  });
+
+  it("retries the main AI call on a transient error and then succeeds", async () => {
+    let articleAttempts = 0;
     const ai = {
-      run: (async () => {
-        attempts += 1;
-        if (attempts < 2) {
+      run: (async (_m: string, options: RunArgs) => {
+        if (options.messages[0].content.includes("前提知識")) {
+          return sseStream("背景");
+        }
+        articleAttempts += 1;
+        if (articleAttempts < 2) {
           throw new Error("transient AI error");
         }
         return sseStream("リトライ後の要約");
@@ -79,17 +161,10 @@ describe("summarizeArticle", () => {
     } as Ai;
     const noSleep = async () => {};
 
-    const result = await summarizeArticle(
-      ai,
-      "@cf/model",
-      300,
-      "t",
-      "本文",
-      noSleep,
-    );
+    const result = await summarizeArticle(ai, "@cf/model", 300, "t", "本文", noSleep);
 
     expect(decodeSummary(result)).toEqual({ raw: "リトライ後の要約" });
-    expect(attempts).toBe(2);
+    expect(articleAttempts).toBe(2);
   });
 
   it("records a per-attempt metric with finish/content length on success", async () => {
@@ -100,8 +175,12 @@ describe("summarizeArticle", () => {
       metrics.push(m);
     });
 
-    expect(metrics).toHaveLength(1);
-    expect(metrics[0]).toMatchObject({
+    // メイン要約と前提知識でそれぞれ 1 件記録する。
+    const article = metrics.filter((m) => m.label === "article");
+    const background = metrics.filter((m) => m.label === "background");
+    expect(article).toHaveLength(1);
+    expect(background).toHaveLength(1);
+    expect(article[0]).toMatchObject({
       label: "article",
       model: "@cf/model",
       attempt: 0,
@@ -110,11 +189,12 @@ describe("summarizeArticle", () => {
       empty: false,
       error: null,
     });
-    expect(metrics[0].contentLen).toBeGreaterThan(0);
+    expect(article[0].contentLen).toBeGreaterThan(0);
   });
 
   it("records an empty metric for every attempt when the model returns no content", async () => {
     // 推論だけで可視回答が空 → 空メトリクス記録＋エラー化してリトライ、を全試行繰り返す。
+    // メイン要約が全試行空で失敗すると前提知識まで進まないので、metric はメイン 4 件のみ。
     const { ai } = mockAi(async () => "");
     const metrics: DigestMetric[] = [];
     const noSleep = async () => {};
@@ -125,59 +205,73 @@ describe("summarizeArticle", () => {
       }),
     ).rejects.toThrow("empty content");
 
-    // 初回 + リトライ 3 = 4 試行、いずれも空。
+    // 初回 + リトライ 3 = 4 試行、いずれも空。すべてメイン要約（article）。
     expect(metrics).toHaveLength(4);
-    expect(metrics.every((m) => m.empty && m.error === null)).toBe(true);
+    expect(
+      metrics.every((m) => m.empty && m.error === null && m.label === "article"),
+    ).toBe(true);
     expect(metrics.map((m) => m.attempt)).toEqual([0, 1, 2, 3]);
   });
 
-  it("asks for a detailed, factual five-part summary that stands on its own", async () => {
+  it("asks the main call for a detailed, factual four-part summary that stands on its own", async () => {
     const { ai, calls } = mockAi();
     await summarizeArticle(ai, "@cf/model", 300, "t", "b");
-    const [system] = calls[0].options.messages;
-    expect(system.content).toContain("想定対象読者");
-    expect(system.content).toContain("前提知識");
-    expect(system.content).toContain("全体の要約");
-    expect(system.content).toContain("著者の主張");
-    expect(system.content).toContain("結論");
-    // 5項目であることを明記し、旧「命題」見出しは残さない。
-    expect(system.content).toContain("以下の5項目");
-    expect(system.content).not.toContain("・命題：");
-    expect(system.content).toContain("記事を読んでいない人");
-    expect(system.content).toContain("8〜12文");
-    expect(system.content).toContain("背景");
-    expect(system.content).toContain("主要な事実");
-    expect(system.content).toContain("固有名詞");
-    expect(system.content).toContain("人名");
-    expect(system.content).toContain("役割");
-    expect(system.content).toContain("数値");
-    expect(system.content).toContain("推測");
-    expect(system.content).toContain("一般論");
-    expect(system.content).toContain("将来予測");
-    expect(system.content).toContain("本文抜粋");
-    expect(system.content).toContain("複数の話題");
-    expect(system.content).toContain("一つの主張や結論");
-    expect(system.content).toContain("記事の後半");
-    expect(system.content).toContain("原文の綴り");
-    expect(system.content).toContain("日本語へ置き換えず");
-    expect(system.content).toContain("一般論で代替しない");
-    expect(system.content).toContain("誰が何を述べたか");
-    expect(system.content).toContain("数値や具体例");
-    expect(system.content).toContain("記事内に登場する人物");
-    expect(system.content).toContain("記事著者自身の見解");
-    expect(system.content).toContain("見出しを一字一句変えず");
-    expect(system.content).toContain("フェーズ1：原文要約");
-    expect(system.content).toContain("原文と同じ言語");
-    expect(system.content).toContain("この段階では翻訳しない");
-    expect(system.content).toContain("フェーズ2：日本語翻訳");
-    expect(system.content).toContain("妥当な日本語訳");
-    expect(system.content).toContain("原文のまま");
-    expect(system.content.indexOf("フェーズ1：原文要約")).toBeLessThan(
-      system.content.indexOf("フェーズ2：日本語翻訳"),
+    const system = articleCall(calls).options.messages[0].content;
+    expect(system).toContain("想定対象読者");
+    expect(system).toContain("全体の要約");
+    expect(system).toContain("著者の主張");
+    expect(system).toContain("結論");
+    // 本文由来は 4 項目。前提知識は別呼び出しなのでメインの見出しには含めない。
+    expect(system).toContain("以下の4項目");
+    expect(system).not.toContain("・前提知識：");
+    expect(system).not.toContain("・命題：");
+    expect(system).toContain("記事を読んでいない人");
+    expect(system).toContain("8〜12文");
+    expect(system).toContain("背景");
+    expect(system).toContain("主要な事実");
+    expect(system).toContain("固有名詞");
+    expect(system).toContain("人名");
+    expect(system).toContain("役割");
+    expect(system).toContain("数値");
+    expect(system).toContain("推測");
+    expect(system).toContain("一般論");
+    expect(system).toContain("将来予測");
+    expect(system).toContain("本文抜粋");
+    expect(system).toContain("複数の話題");
+    expect(system).toContain("一つの主張や結論");
+    expect(system).toContain("記事の後半");
+    expect(system).toContain("原文の綴り");
+    expect(system).toContain("日本語へ置き換えず");
+    expect(system).toContain("一般論で代替しない");
+    expect(system).toContain("誰が何を述べたか");
+    expect(system).toContain("数値や具体例");
+    expect(system).toContain("記事内に登場する人物");
+    expect(system).toContain("記事著者自身の見解");
+    expect(system).toContain("見出しを一字一句変えず");
+    expect(system).toContain("著者自身の主張は明示されていない");
+    expect(system).toContain("フェーズ1：原文要約");
+    expect(system).toContain("原文と同じ言語");
+    expect(system).toContain("この段階では翻訳しない");
+    expect(system).toContain("フェーズ2：日本語翻訳");
+    expect(system).toContain("妥当な日本語訳");
+    expect(system).toContain("原文のまま");
+    expect(system.indexOf("フェーズ1：原文要約")).toBeLessThan(
+      system.indexOf("フェーズ2：日本語翻訳"),
     );
-    // 前提知識だけは本文外の一般知識を許す例外である旨を明示する。
-    expect(system.content).toContain("一般知識");
-    expect(system.content).toContain("著者自身の主張は明示されていない");
+  });
+
+  it("asks the background call to explain prerequisites from general knowledge", async () => {
+    const { ai, calls } = mockAi();
+    await summarizeArticle(ai, "@cf/model", 300, "t", "b");
+    const system = backgroundCall(calls).options.messages[0].content;
+    expect(system).toContain("前提知識");
+    // この項目だけ本文外の一般知識を使ってよい例外である旨。
+    expect(system).toContain("一般知識");
+    expect(system).toContain("2〜4文");
+    // 記事そのものの要約・結論・著者の主張は書かせない。
+    expect(system).toContain("要約や");
+    expect(system).toContain("著者の主張は書かない");
+    expect(system).toContain("見出しや箇条書きは付けず");
   });
 });
 
@@ -319,7 +413,8 @@ describe("summarizeEntries", () => {
       500,
     );
 
-    expect(calls).toHaveLength(1);
+    // 1 記事につきメイン要約＋前提知識で 2 回呼ぶ。
+    expect(calls).toHaveLength(2);
     expect(decodeSummary(summaries.get(1)!)).toEqual({ raw: "s" });
     expect(failed).toBe(0);
   });
@@ -410,18 +505,18 @@ describe("summarizeEntries", () => {
 });
 
 describe("parseStructuredSummary", () => {
-  const FIVE = [
+  // メイン要約は本文由来の 4 項目のみ（前提知識は別呼び出しで生成しマージするため、
+  // メイン出力のパース対象には含めない）。
+  const FOUR = [
     "・想定対象読者：技術者向け",
-    "・前提知識：分散システムの基礎。",
     "・全体の要約：AとBが議論された。CはDと述べた。",
     "・著者の主張：著者自身の主張は明示されていない",
     "・結論：統一的な結論は明示されていない",
   ].join("\n");
 
-  it("splits the fixed five headings into fields", () => {
-    expect(parseStructuredSummary(FIVE)).toEqual({
+  it("splits the fixed four body headings into fields", () => {
+    expect(parseStructuredSummary(FOUR)).toEqual({
       audience: "技術者向け",
-      background: "分散システムの基礎。",
       overview: "AとBが議論された。CはDと述べた。",
       claims: "著者自身の主張は明示されていない",
       conclusion: "統一的な結論は明示されていない",
@@ -430,10 +525,9 @@ describe("parseStructuredSummary", () => {
 
   it("tolerates a missing 「・」 bullet and half-width colon", () => {
     const noBullet =
-      "想定対象読者:読者\n前提知識:ぜんてい\n全体の要約:ようやく\n著者の主張:しゅちょう\n結論:けつろん";
+      "想定対象読者:読者\n全体の要約:ようやく\n著者の主張:しゅちょう\n結論:けつろん";
     expect(parseStructuredSummary(noBullet)).toEqual({
       audience: "読者",
-      background: "ぜんてい",
       overview: "ようやく",
       claims: "しゅちょう",
       conclusion: "けつろん",
@@ -441,41 +535,43 @@ describe("parseStructuredSummary", () => {
   });
 
   it("returns null when a heading is missing (falls back to raw)", () => {
-    const missing = "・想定対象読者：x\n・全体の要約：y\n・結論：z";
+    const missing = "・想定対象読者：x\n・全体の要約：y";
     expect(parseStructuredSummary(missing)).toBeNull();
   });
 });
 
-describe("summarizeArticle structured output", () => {
-  it("stores the five-part summary as decodable structured sections", async () => {
-    const five = [
+describe("encodeSummary", () => {
+  it("merges a 4-heading main output and a separate background into decodable sections", () => {
+    const four = [
       "・想定対象読者：エンジニア",
-      "・前提知識：背景Z",
       "・全体の要約：本文の主旨。",
       "・著者の主張：主張X",
       "・結論：結論Y",
     ].join("\n");
-    const { ai } = mockAi(async () => five);
-
-    const result = await summarizeArticle(ai, "@cf/model", 4000, "t", "b");
+    const result = encodeSummary(four, "  背景Z  ");
 
     expect(decodeSummary(result)).toEqual({
       sections: {
         audience: "エンジニア",
-        background: "背景Z",
+        background: "背景Z", // 前後の空白は trim される
         overview: "本文の主旨。",
         claims: "主張X",
         conclusion: "結論Y",
       },
     });
   });
+
+  it("keeps raw (dropping background) when the main output is not 4-heading structured", () => {
+    const result = encodeSummary("ただの一文です", "背景Z");
+    expect(decodeSummary(result)).toEqual({ raw: "ただの一文です" });
+  });
 });
 
 describe("decodeSummary", () => {
-  it("structures a legacy plain-text summary (no JSON) into sections", () => {
+  it("structures a plain-text summary (no JSON) into body sections with empty background", () => {
+    // プレーン行（非 JSON）は本文 4 項目のみ。前提知識は JSON 保存分にしか無いので空で補う。
     const legacy = [
       "・想定対象読者：読者",
-      "・前提知識：ぜんてい",
       "・全体の要約：ようやく",
       "・著者の主張：しゅちょう",
       "・結論：けつろん",
@@ -483,7 +579,7 @@ describe("decodeSummary", () => {
     expect(decodeSummary(legacy)).toEqual({
       sections: {
         audience: "読者",
-        background: "ぜんてい",
+        background: "",
         overview: "ようやく",
         claims: "しゅちょう",
         conclusion: "けつろん",
