@@ -131,14 +131,18 @@ describe("summarizeArticle", () => {
     expect(metrics.map((m) => m.attempt)).toEqual([0, 1, 2, 3]);
   });
 
-  it("asks for a detailed, factual four-part summary that stands on its own", async () => {
+  it("asks for a detailed, factual five-part summary that stands on its own", async () => {
     const { ai, calls } = mockAi();
     await summarizeArticle(ai, "@cf/model", 300, "t", "b");
     const [system] = calls[0].options.messages;
     expect(system.content).toContain("想定対象読者");
+    expect(system.content).toContain("前提知識");
     expect(system.content).toContain("全体の要約");
-    expect(system.content).toContain("命題");
+    expect(system.content).toContain("著者の主張");
     expect(system.content).toContain("結論");
+    // 5項目であることを明記し、旧「命題」見出しは残さない。
+    expect(system.content).toContain("以下の5項目");
+    expect(system.content).not.toContain("・命題：");
     expect(system.content).toContain("記事を読んでいない人");
     expect(system.content).toContain("8〜12文");
     expect(system.content).toContain("背景");
@@ -152,7 +156,7 @@ describe("summarizeArticle", () => {
     expect(system.content).toContain("将来予測");
     expect(system.content).toContain("本文抜粋");
     expect(system.content).toContain("複数の話題");
-    expect(system.content).toContain("一つの命題や結論");
+    expect(system.content).toContain("一つの主張や結論");
     expect(system.content).toContain("記事の後半");
     expect(system.content).toContain("原文の綴り");
     expect(system.content).toContain("日本語へ置き換えず");
@@ -171,6 +175,9 @@ describe("summarizeArticle", () => {
     expect(system.content.indexOf("フェーズ1：原文要約")).toBeLessThan(
       system.content.indexOf("フェーズ2：日本語翻訳"),
     );
+    // 前提知識だけは本文外の一般知識を許す例外である旨を明示する。
+    expect(system.content).toContain("一般知識");
+    expect(system.content).toContain("著者自身の主張は明示されていない");
   });
 });
 
@@ -403,29 +410,32 @@ describe("summarizeEntries", () => {
 });
 
 describe("parseStructuredSummary", () => {
-  const FOUR = [
+  const FIVE = [
     "・想定対象読者：技術者向け",
+    "・前提知識：分散システムの基礎。",
     "・全体の要約：AとBが議論された。CはDと述べた。",
-    "・命題：統一的な命題は明示されていない",
+    "・著者の主張：著者自身の主張は明示されていない",
     "・結論：統一的な結論は明示されていない",
   ].join("\n");
 
-  it("splits the fixed four headings into fields", () => {
-    expect(parseStructuredSummary(FOUR)).toEqual({
+  it("splits the fixed five headings into fields", () => {
+    expect(parseStructuredSummary(FIVE)).toEqual({
       audience: "技術者向け",
+      background: "分散システムの基礎。",
       overview: "AとBが議論された。CはDと述べた。",
-      thesis: "統一的な命題は明示されていない",
+      claims: "著者自身の主張は明示されていない",
       conclusion: "統一的な結論は明示されていない",
     });
   });
 
   it("tolerates a missing 「・」 bullet and half-width colon", () => {
     const noBullet =
-      "想定対象読者:読者\n全体の要約:ようやく\n命題:めいだい\n結論:けつろん";
+      "想定対象読者:読者\n前提知識:ぜんてい\n全体の要約:ようやく\n著者の主張:しゅちょう\n結論:けつろん";
     expect(parseStructuredSummary(noBullet)).toEqual({
       audience: "読者",
+      background: "ぜんてい",
       overview: "ようやく",
-      thesis: "めいだい",
+      claims: "しゅちょう",
       conclusion: "けつろん",
     });
   });
@@ -437,22 +447,24 @@ describe("parseStructuredSummary", () => {
 });
 
 describe("summarizeArticle structured output", () => {
-  it("stores the four-part summary as decodable structured sections", async () => {
-    const four = [
+  it("stores the five-part summary as decodable structured sections", async () => {
+    const five = [
       "・想定対象読者：エンジニア",
+      "・前提知識：背景Z",
       "・全体の要約：本文の主旨。",
-      "・命題：主張X",
+      "・著者の主張：主張X",
       "・結論：結論Y",
     ].join("\n");
-    const { ai } = mockAi(async () => four);
+    const { ai } = mockAi(async () => five);
 
     const result = await summarizeArticle(ai, "@cf/model", 4000, "t", "b");
 
     expect(decodeSummary(result)).toEqual({
       sections: {
         audience: "エンジニア",
+        background: "背景Z",
         overview: "本文の主旨。",
-        thesis: "主張X",
+        claims: "主張X",
         conclusion: "結論Y",
       },
     });
@@ -463,15 +475,37 @@ describe("decodeSummary", () => {
   it("structures a legacy plain-text summary (no JSON) into sections", () => {
     const legacy = [
       "・想定対象読者：読者",
+      "・前提知識：ぜんてい",
       "・全体の要約：ようやく",
-      "・命題：めいだい",
+      "・著者の主張：しゅちょう",
       "・結論：けつろん",
     ].join("\n");
     expect(decodeSummary(legacy)).toEqual({
       sections: {
         audience: "読者",
+        background: "ぜんてい",
         overview: "ようやく",
-        thesis: "めいだい",
+        claims: "しゅちょう",
+        conclusion: "けつろん",
+      },
+    });
+  });
+
+  it("reads a legacy JSON row (thesis key) into claims, keeping background empty", () => {
+    // 旧スキーマの保存行（前提知識なし・命題=thesis キー）も欠落なく描画できること。
+    const legacyJson = JSON.stringify({
+      v: 1,
+      audience: "読者",
+      overview: "ようやく",
+      thesis: "きゅうめいだい",
+      conclusion: "けつろん",
+    });
+    expect(decodeSummary(legacyJson)).toEqual({
+      sections: {
+        audience: "読者",
+        background: "",
+        overview: "ようやく",
+        claims: "きゅうめいだい",
         conclusion: "けつろん",
       },
     });
