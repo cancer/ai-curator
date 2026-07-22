@@ -137,9 +137,10 @@ button { font-size: 1rem; cursor: pointer; font-family: inherit; }
 .section-audience h4 { flex: none; align-self: flex-start; margin: 0;
   padding: .1rem .5rem; background: var(--blue-950); color: var(--blue-200);
   border-radius: var(--radius-sm); letter-spacing: .03em; }
+.section-background { border-left: 2px solid var(--border); padding-left: .9rem; }
 .section-overview p { font-size: 1.0625rem; line-height: 1.8; color: var(--gray-50); }
-.section-thesis { border-left: 2px solid var(--accent); padding-left: .9rem; }
-.section-thesis h4 { color: var(--blue-300); }
+.section-claims { border-left: 2px solid var(--accent); padding-left: .9rem; }
+.section-claims h4 { color: var(--blue-300); }
 .section-conclusion { border-left: 2px solid var(--border); padding-left: .9rem; }
 
 /* === フィード: 投票 + 出典 === */
