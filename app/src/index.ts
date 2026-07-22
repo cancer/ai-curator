@@ -10,7 +10,7 @@
 
 import { DailyPass } from "./pipeline/workflow";
 import { renderFeedPage } from "./viewer/index";
-import { renderSettingsForm, handleSettingsUpdate } from "./viewer/settings";
+import { renderSettingsForm, handleConfigApi } from "./viewer/settings";
 import { handleClickRedirect, handleFeedbackApi } from "./viewer/feedback";
 
 // Workflow のクラスは Worker から export しておく必要がある（wrangler の class_name）。
@@ -48,8 +48,8 @@ export default {
     if (method === "GET" && pathname === "/settings") {
       return renderSettingsForm(env, url.searchParams.get("run"));
     }
-    if (method === "POST" && pathname === "/settings") {
-      return handleSettingsUpdate(env, request);
+    if (method === "POST" && pathname === "/api/config") {
+      return handleConfigApi(env, request);
     }
     if (method === "POST" && pathname === "/run") {
       // 日次パスの手動実行。Workflow インスタンスを create するだけで即戻す

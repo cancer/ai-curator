@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { renderSettingsForm, handleSettingsUpdate } from "./settings";
+import { renderSettingsForm, handleConfigApi } from "./settings";
 import type { Env } from "../index";
 import { SYSTEM_CONFIG, type UserConfig } from "../config";
 
@@ -134,7 +134,6 @@ function makeStore(user: UserConfig | null) {
   };
 }
 
-/** D1 に何も無い（空）状態の Env。フォーム初期表示のフォールバック検証用。 */
 function makeEmptyEnv() {
   return makeStore(null);
 }
@@ -143,52 +142,56 @@ function makeEnv(user: UserConfig = baseUser()) {
   return makeStore(user);
 }
 
-function postForm(fields: Record<string, string>): Request {
-  return new Request("https://x/settings", {
+/** JSON body の POST /api/config リクエストを組む。 */
+function postJson(body: unknown): Request {
+  return new Request("https://x/api/config", {
     method: "POST",
-    body: new URLSearchParams(fields),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
   });
 }
 
-// 2 軸 + ソースの妥当なフォーム値。テストごとに一部を差し替える。
-// 関心軸はラベルのみ入力（seedText 廃止）。既存軸は hidden id を round-trip する。
-function validFields(): Record<string, string> {
-  return {
-    "axis-0-id": "ai",
-    "axis-0-label": "AI",
-    "axis-1-id": "web-fw",
-    "axis-1-label": "Web FW",
-    feeds: "https://martinfowler.com/feed.atom",
-  };
-}
-
 describe("renderSettingsForm", () => {
-  it("renders current config values in a post form", async () => {
+  it("renders existing axes and feeds as editable rows", async () => {
     const { env } = makeEnv();
     const res = await renderSettingsForm(env);
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain('method="post"');
+    // 軸・ソースは行（入力）として描画され、現在値が value に入る。
+    expect(html).toContain('class="row axis-row"');
+    expect(html).toContain('data-id="ai"');
+    expect(html).toContain('value="AI"');
+    expect(html).toContain('class="row feed-row"');
     expect(html).toContain("martinfowler.com/feed.atom");
-    // scoring は SYSTEM_CONFIG の値を表示のみ（値が見えること）
+    // scoring は SYSTEM_CONFIG の値を表示のみ（値が見えること）。
     expect(html).toContain(String(SYSTEM_CONFIG.scoring.weights.interest));
   });
 
-  it("opens with an empty form when KV is empty", async () => {
+  it("renders the add-rows, autosave indicator, and row templates", async () => {
+    const { env } = makeEnv();
+    const html = await (await renderSettingsForm(env)).text();
+    expect(html).toContain('id="draft-axis-label"');
+    expect(html).toContain('id="draft-axis-category"');
+    expect(html).toContain('id="draft-feed"');
+    expect(html).toContain('id="add-axis"');
+    expect(html).toContain('id="add-feed"');
+    // 追加行の複製元テンプレート。
+    expect(html).toContain('<template id="axis-tpl">');
+    expect(html).toContain('<template id="feed-tpl">');
+    // 自動保存の告知（保存ボタンは無い）。
+    expect(html).toContain("変更は自動保存されます");
+    expect(html).not.toContain("保存</button>");
+  });
+
+  it("opens with empty lists when D1 is empty (no rows, drafts present)", async () => {
     const { env } = makeEmptyEnv();
     const res = await renderSettingsForm(env);
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain('method="post"');
-    // 空 KV では設定をコードに持たないので、フォームは空（feeds と新規トピック欄のみ）で開く。
-    expect(html).toContain('name="feeds"');
-    expect(html).toContain('name="newTopics"');
-  });
-
-  it("renders a multi-line textarea for adding topics in bulk", async () => {
-    const { env } = makeEnv();
-    const html = await (await renderSettingsForm(env)).text();
-    expect(html).toContain('<textarea name="newTopics"');
+    // 空 config では一覧コンテナは空（テンプレートには行があるので一覧の中身で判定する）。
+    expect(html).toContain('<div id="axes-list"></div>');
+    expect(html).toContain('<div id="feeds-list"></div>');
+    expect(html).toContain('id="draft-axis-label"');
   });
 
   it("renders a run-now button that posts to /run", async () => {
@@ -212,7 +215,7 @@ describe("renderSettingsForm", () => {
     expect(html).toContain('href="/runs/abc-123"');
   });
 
-  it("renders a category input per axis, prefilled and wired to the datalist", async () => {
+  it("prefills the category input for a categorized axis", async () => {
     const { env } = makeEnv({
       interestAxes: [
         { id: "ai", label: "AI", category: "技術" },
@@ -221,153 +224,155 @@ describe("renderSettingsForm", () => {
       sources: { feeds: [] },
     });
     const html = await (await renderSettingsForm(env)).text();
-    expect(html).toContain('name="axis-0-category"');
-    expect(html).toContain('name="axis-1-category"');
-    expect(html).toContain('list="axis-categories"');
-    // 既存カテゴリが value に入る（未分類の軸は空）。
+    expect(html).toContain('class="axis-category"');
     expect(html).toContain('value="技術"');
   });
 
-  it("renders a single datalist of the distinct existing categories", async () => {
+  it("escapes axis and feed values to prevent breaking out of attributes", async () => {
     const { env } = makeEnv({
-      interestAxes: [
-        { id: "a", label: "A", category: "技術" },
-        { id: "b", label: "B", category: "技術" },
-        { id: "c", label: "C", category: "暮らし" },
-      ],
-      sources: { feeds: [] },
+      interestAxes: [{ id: "x", label: '"><script>alert(1)</script>' }],
+      sources: { feeds: ["https://x/?a=1&b=2"] },
     });
     const html = await (await renderSettingsForm(env)).text();
-    expect(html).toContain('<datalist id="axis-categories">');
-    // distinct: 技術 は option 1 個だけ。
-    expect((html.match(/<option value="技術"/g) ?? []).length).toBe(1);
-    expect(html).toContain('<option value="暮らし"');
-  });
-
-  it("renders a single category input for the newly added topics", async () => {
-    const { env } = makeEnv();
-    const html = await (await renderSettingsForm(env)).text();
-    expect(html).toContain('name="newTopicsCategory"');
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).toContain("https://x/?a=1&amp;b=2");
   });
 });
 
-describe("handleSettingsUpdate", () => {
-  it("saves valid input and redirects 303 to /settings", async () => {
+describe("handleConfigApi", () => {
+  it("saves valid JSON and returns ok with the echoed config", async () => {
     const { env, puts, saved } = makeEnv();
-    const fields = validFields();
-    fields["axis-0-label"] = "brand new label";
-    const res = await handleSettingsUpdate(env, postForm(fields));
-    expect(res.status).toBe(303);
-    expect(res.headers.get("location")).toBe("/settings");
+    const res = await handleConfigApi(
+      env,
+      postJson({
+        interestAxes: [
+          { id: "ai", label: "brand new label" },
+          { id: "web-fw", label: "Web FW" },
+        ],
+        feeds: ["https://martinfowler.com/feed.atom"],
+      }),
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { ok: boolean };
+    expect(json.ok).toBe(true);
     expect(puts.length).toBe(1);
     expect(saved().interestAxes[0].label).toBe("brand new label");
-    // 既存軸の id は hidden で round-trip され保持される。
+    // 既存軸の id は round-trip され保持される。
     expect(saved().interestAxes[0].id).toBe("ai");
-    // KV には interestAxes / sources のみ書く（システム側は書かない）。
     expect(Object.keys(saved()).sort()).toEqual(["interestAxes", "sources"]);
-    // sources は feeds のみ。
     expect(Object.keys(saved().sources).sort()).toEqual(["feeds"]);
   });
 
-  it("saves from the default form when KV is empty", async () => {
-    const { env, puts, saved } = makeEmptyEnv();
-    const res = await handleSettingsUpdate(env, postForm(validFields()));
-    expect(res.status).toBe(303);
-    expect(puts.length).toBe(1);
-    expect(Object.keys(saved()).sort()).toEqual(["interestAxes", "sources"]);
-    expect(saved().sources.feeds).toEqual([
-      "https://martinfowler.com/feed.atom",
-    ]);
-  });
-
-  it("adds multiple topics at once from the newTopics textarea, each with a fresh id", async () => {
+  it("assigns a fresh id to a new axis (empty/missing id) and echoes it", async () => {
     const { env, saved } = makeEnv();
-    const fields = validFields();
-    // 1 行 1 件で何件でも追加できる（id は保存時に採番）。
-    fields.newTopics = "Topic A\nTopic B\nTopic C";
-    const res = await handleSettingsUpdate(env, postForm(fields));
-    expect(res.status).toBe(303);
-    const labels = saved().interestAxes.map((a) => a.label);
-    expect(labels).toEqual(expect.arrayContaining(["Topic A", "Topic B", "Topic C"]));
-    // 全軸の id が一意に採番される。
+    const res = await handleConfigApi(
+      env,
+      postJson({
+        interestAxes: [
+          { id: "ai", label: "AI" },
+          { label: "Topic New" },
+        ],
+        feeds: [],
+      }),
+    );
+    const json = (await res.json()) as {
+      ok: boolean;
+      interestAxes: { id: string; label: string }[];
+    };
+    expect(json.ok).toBe(true);
+    const added = json.interestAxes.find((a) => a.label === "Topic New");
+    expect(added?.id).toBeTruthy();
+    // 採番された id が実際に保存される。
+    expect(saved().interestAxes.map((a) => a.label)).toContain("Topic New");
     const ids = saved().interestAxes.map((a) => a.id);
     expect(new Set(ids).size).toBe(ids.length);
-    for (const id of ids) expect(id).toBeTruthy();
   });
 
-  it("saves topics-only input when KV is empty (bootstrap via newTopics)", async () => {
-    const { env, saved } = makeEmptyEnv();
-    const res = await handleSettingsUpdate(
-      env,
-      postForm({ feeds: "https://a.example/rss", newTopics: "AI" }),
-    );
-    expect(res.status).toBe(303);
-    expect(saved().interestAxes.map((a) => a.label)).toEqual(["AI"]);
-  });
-
-  it("deletes an axis whose delete checkbox is set", async () => {
+  it("persists a deletion (fewer axes than before)", async () => {
     const { env, saved } = makeEnv();
-    const fields = validFields();
-    fields["axis-1-delete"] = "on";
-    await handleSettingsUpdate(env, postForm(fields));
+    await handleConfigApi(
+      env,
+      postJson({ interestAxes: [{ id: "ai", label: "AI" }], feeds: [] }),
+    );
     expect(saved().interestAxes.map((a) => a.id)).toEqual(["ai"]);
   });
 
-  it("rejects an invalid feed URL with 400 and preserves input", async () => {
-    const { env, puts } = makeEnv();
-    const fields = validFields();
-    fields.feeds = "not a url";
-    const res = await handleSettingsUpdate(env, postForm(fields));
-    expect(res.status).toBe(400);
-    expect(puts.length).toBe(0);
-    const html = await res.text();
-    expect(html).toContain("not a url");
-  });
-
-  it("rejects an empty label with 400", async () => {
-    const { env, puts } = makeEnv();
-    const fields = validFields();
-    fields["axis-0-label"] = "   ";
-    const res = await handleSettingsUpdate(env, postForm(fields));
-    expect(res.status).toBe(400);
-    expect(puts.length).toBe(0);
-  });
-
-  it("saves the category entered for each existing axis", async () => {
+  it("saves the category for an axis and omits it when empty", async () => {
     const { env, saved } = makeEnv();
-    const fields = validFields();
-    fields["axis-0-category"] = "技術";
-    await handleSettingsUpdate(env, postForm(fields));
+    await handleConfigApi(
+      env,
+      postJson({
+        interestAxes: [
+          { id: "ai", label: "AI", category: "技術" },
+          { id: "web-fw", label: "Web FW", category: "" },
+        ],
+        feeds: [],
+      }),
+    );
     const ai = saved().interestAxes.find((a) => a.id === "ai");
     expect(ai?.category).toBe("技術");
+    const web = saved().interestAxes.find((a) => a.id === "web-fw");
+    expect(web && "category" in web).toBe(false);
   });
 
-  it("leaves an axis unclassified when its category input is empty", async () => {
-    const { env, saved } = makeEnv();
-    const res = await handleSettingsUpdate(env, postForm(validFields()));
-    expect(res.status).toBe(303);
-    // category 未入力の軸は key を持たない（未分類）。
-    expect("category" in saved().interestAxes[0]).toBe(false);
-  });
-
-  it("applies newTopicsCategory to every newly added topic", async () => {
-    const { env, saved } = makeEnv();
-    const fields = validFields();
-    fields.newTopics = "Topic A\nTopic B";
-    fields.newTopicsCategory = "新カテゴリ";
-    await handleSettingsUpdate(env, postForm(fields));
-    const added = saved().interestAxes.filter(
-      (a) => a.label === "Topic A" || a.label === "Topic B",
+  it("rejects an empty label with 400 and does not save", async () => {
+    const { env, puts } = makeEnv();
+    const res = await handleConfigApi(
+      env,
+      postJson({ interestAxes: [{ id: "ai", label: "   " }], feeds: [] }),
     );
-    expect(added.map((a) => a.category)).toEqual(["新カテゴリ", "新カテゴリ"]);
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { ok: boolean; errors: string[] };
+    expect(json.ok).toBe(false);
+    expect(json.errors.length).toBeGreaterThan(0);
+    expect(puts.length).toBe(0);
   });
 
-  it("leaves new topics unclassified when newTopicsCategory is empty", async () => {
+  it("rejects zero axes with 400 (at least one required)", async () => {
+    const { env, puts } = makeEnv();
+    const res = await handleConfigApi(
+      env,
+      postJson({ interestAxes: [], feeds: [] }),
+    );
+    expect(res.status).toBe(400);
+    expect(puts.length).toBe(0);
+  });
+
+  it("rejects an invalid feed URL with 400 and does not save", async () => {
+    const { env, puts } = makeEnv();
+    const res = await handleConfigApi(
+      env,
+      postJson({
+        interestAxes: [{ id: "ai", label: "AI" }],
+        feeds: ["not a url"],
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(puts.length).toBe(0);
+  });
+
+  it("drops blank feed entries before saving", async () => {
     const { env, saved } = makeEnv();
-    const fields = validFields();
-    fields.newTopics = "Topic A";
-    await handleSettingsUpdate(env, postForm(fields));
-    const added = saved().interestAxes.find((a) => a.label === "Topic A");
-    expect(added && "category" in added).toBe(false);
+    await handleConfigApi(
+      env,
+      postJson({
+        interestAxes: [{ id: "ai", label: "AI" }],
+        feeds: ["https://a.example/rss", "  ", ""],
+      }),
+    );
+    expect(saved().sources.feeds).toEqual(["https://a.example/rss"]);
+  });
+
+  it("rejects malformed JSON with 400", async () => {
+    const { env, puts } = makeEnv();
+    const bad = new Request("https://x/api/config", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{ not json",
+    });
+    const res = await handleConfigApi(env, bad);
+    expect(res.status).toBe(400);
+    expect(puts.length).toBe(0);
   });
 });
