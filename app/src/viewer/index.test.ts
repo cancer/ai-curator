@@ -247,8 +247,9 @@ describe("renderFeedPage", () => {
     const structured = JSON.stringify({
       v: 1,
       audience: "読者A",
+      background: "前提E",
       overview: "要約B",
-      thesis: "命題C",
+      claims: "主張C",
       conclusion: "結論D",
     });
     const env = makeEnv({
@@ -256,12 +257,12 @@ describe("renderFeedPage", () => {
       entries: [entryRow({ rank: 1, feed_entry_id: 1, summary: structured })],
     });
     const html = await (await renderFeedPage(env, 1)).text();
-    // 4 見出しと各本文がセクションとして出る。
+    // 5 見出しと各本文がセクションとして出る。
     expect(html).toContain("summary-section");
-    for (const label of ["想定対象読者", "全体の要約", "命題", "結論"]) {
+    for (const label of ["想定対象読者", "前提知識", "全体の要約", "著者の主張", "結論"]) {
       expect(html).toContain(label);
     }
-    for (const body of ["読者A", "要約B", "命題C", "結論D"]) {
+    for (const body of ["読者A", "前提E", "要約B", "主張C", "結論D"]) {
       expect(html).toContain(body);
     }
     // コンテナは 1 個。

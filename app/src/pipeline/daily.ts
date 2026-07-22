@@ -630,15 +630,15 @@ export interface GateDeps {
 
 /**
  * decodeSummary の復元結果を judge へ渡す平文にする。構造化できていれば
- * overview/thesis/conclusion（想定対象読者は軸判定に不要なので含めない）を結合し、
+ * overview/claims/conclusion（想定対象読者は軸判定に不要なので含めない）を結合し、
  * raw ならそのまま使う。
  */
 function summaryPlaintext(
   decoded: ReturnType<typeof decodeSummary>,
 ): string {
   if ("sections" in decoded) {
-    const { overview, thesis, conclusion } = decoded.sections;
-    return [overview, thesis, conclusion].join("\n");
+    const { overview, claims, conclusion } = decoded.sections;
+    return [overview, claims, conclusion].join("\n");
   }
   return decoded.raw;
 }

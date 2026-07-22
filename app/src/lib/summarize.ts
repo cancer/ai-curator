@@ -12,15 +12,20 @@
 import type { DigestConfig } from "../config";
 
 /**
- * 記事要約の 4 項目。LLM は固定見出し（想定対象読者／全体の要約／命題／結論）で
- * プレーンテキストを返すが、ビューアが見出しごとに整形できるよう、生成時にこの構造へ
- * パースして JSON で保存する（summaries.text）。パースできない出力（見出し欠落など）は
+ * 記事要約の 5 項目。LLM は固定見出し（想定対象読者／前提知識／全体の要約／著者の主張／
+ * 結論）でプレーンテキストを返すが、ビューアが見出しごとに整形できるよう、生成時にこの
+ * 構造へパースして JSON で保存する（summaries.text）。パースできない出力（見出し欠落など）は
  * raw に丸ごと入れて欠落させない。旧プレーン行は JSON でないので decode 側で raw 扱いにする。
+ *
+ * background（前提知識）だけは本文抜粋外の一般知識で補う項目、claims（著者の主張）は
+ * 旧 thesis（命題）を著者自身の主張へ絞り込んだ後継。旧 JSON（thesis キー）は decode 側で
+ * claims へ読み替えて欠落させない。
  */
 export interface StructuredSummary {
   audience: string;
+  background: string;
   overview: string;
-  thesis: string;
+  claims: string;
   conclusion: string;
 }
 
@@ -29,26 +34,48 @@ type StoredSummary =
   | ({ v: 1 } & StructuredSummary)
   | { v: 1; raw: string };
 
-/** 見出しキー → 表示ラベル。パースと描画の単一の情報源。順序が本文中の出現順。 */
+/** 見出しキー → 表示ラベル。描画の単一の情報源。順序が表示順（前提知識は要約の前）。 */
 export const SUMMARY_SECTIONS: { key: keyof StructuredSummary; label: string }[] =
   [
     { key: "audience", label: "想定対象読者" },
+    { key: "background", label: "前提知識" },
     { key: "overview", label: "全体の要約" },
-    { key: "thesis", label: "命題" },
+    { key: "claims", label: "著者の主張" },
     { key: "conclusion", label: "結論" },
   ];
 
 /**
- * 固定見出しのプレーンテキストを 4 項目へパースする。見出しは順番に現れる前提で、
- * 直前の見出し以降から次の見出しを探す（本文中に紛れた同語を誤検出しない）。全項目が
- * 順序どおり見つからなければ null（=構造化失敗、raw 扱い）。見出しは全角「：」半角「:」
- * どちらでも、先頭の「・」有無も許容する。
+ * メイン要約（ARTICLE_SYSTEM）が返す本文由来の 4 項目。前提知識（background）は別の
+ * LLM 呼び出し（BACKGROUND_SYSTEM）で生成しここへ後からマージするため、メイン出力の
+ * パース対象からは外す。順序は ARTICLE_SYSTEM の見出し出力順と一致させる。
  */
-export function parseStructuredSummary(text: string): StructuredSummary | null {
+const BODY_SECTIONS: { key: keyof StructuredSummary; label: string }[] = [
+  { key: "audience", label: "想定対象読者" },
+  { key: "overview", label: "全体の要約" },
+  { key: "claims", label: "著者の主張" },
+  { key: "conclusion", label: "結論" },
+];
+
+/** メイン要約から前提知識を除いた 4 項目。 */
+export type BodySummary = Pick<
+  StructuredSummary,
+  "audience" | "overview" | "claims" | "conclusion"
+>;
+
+/**
+ * 固定見出しのプレーンテキストを、与えた見出し定義の順に各項目へパースする。見出しは
+ * 順番に現れる前提で、直前の見出し以降から次の見出しを探す（本文中に紛れた同語を誤検出
+ * しない）。全項目が順序どおり見つからなければ null（=構造化失敗）。見出しは全角「：」
+ * 半角「:」どちらでも、先頭の「・」有無も許容する。
+ */
+function parseFixedHeadings(
+  text: string,
+  sections: { key: keyof StructuredSummary; label: string }[],
+): Partial<StructuredSummary> | null {
   const starts: number[] = [];
   const valueFrom: number[] = [];
   let searchFrom = 0;
-  for (const { label } of SUMMARY_SECTIONS) {
+  for (const { label } of sections) {
     let sep = `${label}：`;
     let idx = text.indexOf(sep, searchFrom);
     if (idx < 0) {
@@ -61,24 +88,33 @@ export function parseStructuredSummary(text: string): StructuredSummary | null {
     searchFrom = idx + sep.length;
   }
 
-  const result = {} as StructuredSummary;
-  for (let i = 0; i < SUMMARY_SECTIONS.length; i++) {
+  const result: Partial<StructuredSummary> = {};
+  for (let i = 0; i < sections.length; i++) {
     const end = i + 1 < starts.length ? starts[i + 1] : text.length;
     // 次の見出し行の先頭に付く「・」や改行・空白を値から落とす。
     const value = text
       .slice(valueFrom[i], end)
       .replace(/[・\s]+$/u, "")
       .trim();
-    result[SUMMARY_SECTIONS[i].key] = value;
+    result[sections[i].key] = value;
   }
   return result;
 }
 
-/** LLM 生出力を保存用 JSON へ変換する。構造化できなければ raw で保持。 */
-export function encodeSummary(rawText: string): string {
+/** メイン要約の生出力を本文由来の 4 項目へパースする。失敗（見出し欠落）なら null。 */
+export function parseStructuredSummary(text: string): BodySummary | null {
+  const parsed = parseFixedHeadings(text, BODY_SECTIONS);
+  return parsed ? (parsed as BodySummary) : null;
+}
+
+/**
+ * メイン要約の生出力と、別呼び出しで得た前提知識テキストを保存用 JSON へ変換する。
+ * メイン要約が 4 項目へ構造化できなければ raw で保持する（この場合 background は破棄）。
+ */
+export function encodeSummary(rawText: string, background = ""): string {
   const parsed = parseStructuredSummary(rawText);
   const stored: StoredSummary = parsed
-    ? { v: 1, ...parsed }
+    ? { v: 1, ...parsed, background: background.trim() }
     : { v: 1, raw: rawText };
   return JSON.stringify(stored);
 }
@@ -90,12 +126,11 @@ export function encodeSummary(rawText: string): string {
 export function decodeSummary(
   stored: string,
 ): { sections: StructuredSummary } | { raw: string } {
-  // raw テキストは、旧プレーン行（見出し付き 4 項目のことが多い）でも構造化できるよう
-  // パースを試み、失敗したときだけ raw のまま返す。これで新規保存分だけでなく既存行も
-  // 見出し付きで整形される。
+  // raw テキストは、旧プレーン行（見出し付き本文 4 項目のことが多い）でも構造化できるよう
+  // パースを試み、失敗したときだけ raw のまま返す。前提知識は旧行に無いので空で補う。
   const fromRaw = (raw: string): { sections: StructuredSummary } | { raw: string } => {
     const parsed = parseStructuredSummary(raw);
-    return parsed ? { sections: parsed } : { raw };
+    return parsed ? { sections: { ...parsed, background: "" } } : { raw };
   };
 
   let parsed: unknown;
@@ -109,9 +144,12 @@ export function decodeSummary(
     return {
       sections: {
         audience: String(p.audience),
-        overview: String((p as StructuredSummary).overview ?? ""),
-        thesis: String((p as StructuredSummary).thesis ?? ""),
-        conclusion: String((p as StructuredSummary).conclusion ?? ""),
+        background: String(p.background ?? ""),
+        overview: String(p.overview ?? ""),
+        // 旧 JSON は thesis（命題）キー。新キー claims を優先し、無ければ thesis を読み替えて
+        // 既存行も「著者の主張」見出しで欠落なく描画する。
+        claims: String(p.claims ?? p.thesis ?? ""),
+        conclusion: String(p.conclusion ?? ""),
       },
     };
   }
@@ -127,7 +165,7 @@ export function decodeSummary(
  * そのものは持たない。
  */
 export interface DigestMetric {
-  /** 'article' | 'trend' | 'relevance'（軸ゲート判定） などの用途ラベル。 */
+  /** 'article' | 'background' | 'trend' | 'relevance'（軸ゲート判定） などの用途ラベル。 */
   label: string;
   model: string;
   /** 0 起点の試行番号。 */
@@ -152,6 +190,12 @@ export type OnDigestMetric = (metric: DigestMetric) => Promise<void> | void;
 /** プロンプトに載せる本文抜粋の最大文字数（24k context に収まる保守値）。 */
 const BODY_EXCERPT_CHARS = 20000;
 
+/**
+ * 前提知識生成に載せる本文抜粋の最大文字数。前提知識はテーマ把握が目的で本文全体は不要
+ * なため、メインより短くしてトークンを節約する（テーマは冒頭で分かることが多い）。
+ */
+const BACKGROUND_EXCERPT_CHARS = 4000;
+
 /** 初期試行の後の最大リトライ回数（計 4 試行、バックオフ 1s → 2s → 4s）。 */
 const MAX_RETRIES = 3;
 
@@ -166,16 +210,32 @@ const ARTICLE_SYSTEM =
   "本文で確認できる固有名詞、数値、背景、主要な事実、因果関係を可能な限り残し、特に重要な人名、組織名、製品名、役割、数値は省略しないでください。" +
   "誰が何を述べたかという帰属を変えず、引用・紹介された人物の主張と記事著者自身の見解を区別し、重要な数値や具体例も残してください。" +
   "本文にない情報を補ったり推測したりせず、評価、一般論、将来予測も本文に明記されたものだけを記述してください。" +
-  "複数の話題を扱う記事を無理に一つの命題や結論へ統合せず、記事の後半を含む主要な話題を最初から最後まで確認してください。\n\n" +
+  "複数の話題を扱う記事を無理に一つの主張や結論へ統合せず、記事の後半を含む主要な話題を最初から最後まで確認してください。\n\n" +
   "フェーズ2：日本語翻訳\n" +
   "フェーズ1の要約案だけを日本語へ翻訳してください。意味・帰属・固有名詞・数値・話題の数を変更、追加、削除しないでください。" +
   "専門用語は妥当な日本語訳に確信がある場合だけ翻訳し、見つからない場合は日本語へ置き換えず原文のまま（原文の綴りを維持して）残してください。\n\n" +
   "フェーズ1の要約案や作業過程は出力せず、フェーズ2の結果だけを以下の4項目で出力してください。" +
   "次の見出しを一字一句変えず、各見出しから書き始めてください。\n" +
-  "・想定対象読者：必ず1文。必要な前提知識や関心分野だけを示し、記事内に登場する人物を対象読者とみなさない\n" +
+  "・想定対象読者：必ず1文。想定する読者層や関心分野だけを示し、記事内に登場する人物を対象読者とみなさない\n" +
   "・全体の要約：8〜12文。主要な話題を入力順に漏らさず、一つの話題へ偏る前に全話題を扱い、発言者、数値や具体例、議論、結果・影響の関係が分かるようにまとめる\n" +
-  "・命題：1〜2文。本文で明示された中心的な論点や主張を示す。単一の命題がなければ、必ず『統一的な命題は明示されていない』と書き、一般論で代替しない\n" +
+  "・著者の主張：1〜2文。記事著者自身が本文で示している中心的な主張・立場を、引用・紹介された人物の発言と区別して示す。著者自身の主張が明示されていなければ、必ず『著者自身の主張は明示されていない』と書き、一般論で代替しない\n" +
   "・結論：1〜2文。本文が明示する結論、成果、方針、今後の見通しだけを示す。統一的な結論がなければ、必ず『統一的な結論は明示されていない』と書き、本文外の総括を加えない";
+
+/**
+ * 前提知識（background）専用の system。ここだけは本文抜粋外の一般知識を許す例外項目
+ * （分けた理由: ARTICLE_SYSTEM の「本文だけ／推測しない」というハルシネーション抑止を
+ * 弱めないよう、外部知識を使う生成をコンテキストごと切り離す）。記事そのものの要約・
+ * 結論・著者の主張は書かせず、分野の共有前提の説明に閉じる。見出し・箇条書きは付けさせず、
+ * 説明文だけを返させる（呼び出し側が background フィールドへ格納する）。
+ */
+const BACKGROUND_SYSTEM =
+  "あなたは技術記事の読者に、その記事を理解するための前提知識を提供する編集者です。" +
+  "与えられた記事タイトルと本文抜粋から記事のテーマを把握し、そのテーマを理解するのに必要な" +
+  "一般的・技術的な背景を、あなたの一般知識から日本語で2〜4文で説明してください。" +
+  "この項目は本文抜粋の外にある一般知識を使ってよい例外です。" +
+  "ただし記事そのものの要約や、記事が述べる結論・著者の主張は書かないでください。" +
+  "その分野で広く共有されている前提にとどめ、特定の新規性のある主張や評価は避けてください。" +
+  "見出しや箇条書きは付けず、説明文だけを出力してください。";
 
 const TREND_SYSTEM =
   "あなたは技術ニュースの編集者です。ある関心テーマについて、当日の記事タイトル一覧から、" +
@@ -361,7 +421,40 @@ export async function runTextGeneration(
   throw lastError ?? new Error("text generation failed");
 }
 
-/** 1 記事の要約。本文抜粋は先頭 BODY_EXCERPT_CHARS 字に切り詰める。 */
+/**
+ * 記事を理解するための前提知識（background）を、本文抜粋外の一般知識から生成する。
+ * ハルシネーション抑止の本文専用プロンプトを弱めないよう、メイン要約とは system・入力
+ * 抜粋を分けた専用呼び出し。本文抜粋は BACKGROUND_EXCERPT_CHARS 字に切り詰める。
+ */
+export function generateBackground(
+  ai: Ai,
+  model: string,
+  maxTokens: number,
+  title: string,
+  body: string,
+  sleep?: (ms: number) => Promise<void>,
+  onMetric?: OnDigestMetric,
+): Promise<string> {
+  const excerpt = body.slice(0, BACKGROUND_EXCERPT_CHARS);
+  const user = `タイトル: ${title}\n\n本文抜粋:\n${excerpt}`;
+  return runTextGeneration(
+    ai,
+    model,
+    maxTokens,
+    BACKGROUND_SYSTEM,
+    user,
+    "background",
+    sleep,
+    onMetric,
+  );
+}
+
+/**
+ * 1 記事の要約。本文由来の 4 項目（メイン要約）と前提知識を別々の LLM 呼び出しで得て
+ * マージする。呼び出しは 2 回で、まずメイン要約（必須。失敗すれば例外を伝播し呼び出し側
+ * が failed 計上）→ 次に前提知識（任意。失敗しても要約全体を落とさず background 空で
+ * degrade）の順。本文抜粋はメインが BODY_EXCERPT_CHARS、前提知識が BACKGROUND_EXCERPT_CHARS。
+ */
 export async function summarizeArticle(
   ai: Ai,
   model: string,
@@ -383,8 +476,29 @@ export async function summarizeArticle(
     sleep,
     onMetric,
   );
-  // 4 項目へ構造化して保存する（ビューアが見出しごとに整形できるように）。
-  return encodeSummary(raw);
+
+  // 前提知識は本文外の一般知識を使う別コンテキストの生成。ここが失敗しても要約本体
+  // （本文 4 項目）は保存したいので、例外は握り潰し空文字で degrade する。
+  let background = "";
+  try {
+    background = await generateBackground(
+      ai,
+      model,
+      maxTokens,
+      title,
+      body,
+      sleep,
+      onMetric,
+    );
+  } catch (err) {
+    console.warn(
+      `summarize: background generation failed for "${title}"; ` +
+        `keeping summary without it: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // 本文 4 項目＋前提知識を構造化して保存する（ビューアが見出しごとに整形できるように）。
+  return encodeSummary(raw, background);
 }
 
 /** 1 軸の傾向叙述。その軸のタイトル上位群を入力にする。 */
