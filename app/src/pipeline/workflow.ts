@@ -25,6 +25,7 @@ import { loadConfig } from "../config";
 import { syncInterestAxes } from "../lib/embedding";
 import {
   buildTrends,
+  gateAxisRelevance,
   ingestFeed,
   scoreAndBuildFeed,
   summarizeFeed,
@@ -119,6 +120,12 @@ export async function runDailyWorkflow(
   // summarize: 当日 feed_entries を全件要約（body はここで再取得して使い捨て）。
   await step.do("summarize", SUMMARIZE_STEP_CONFIG, async () =>
     summarizeFeed(env.DB, env.AI, config.digest, date),
+  );
+
+  // relevance-gate: 軸マッチ済み・未判定の記事を LLM で該当/非該当判定する。
+  // summarize と同じく全件逐次 LLM 呼び出しのため、同じ長め timeout を流用する。
+  await step.do("relevance-gate", SUMMARIZE_STEP_CONFIG, async () =>
+    gateAxisRelevance(env.DB, env.AI, config.digest, date),
   );
 
   // trends: 軸別の傾向サマリ（当日分 delete→insert）。

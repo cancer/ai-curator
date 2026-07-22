@@ -42,6 +42,7 @@ export default {
         page,
         url.searchParams.get("category"),
         url.searchParams.get("body"),
+        url.searchParams.get("gate"),
       );
     }
     if (method === "GET" && pathname === "/settings") {

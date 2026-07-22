@@ -165,7 +165,7 @@ export function decodeSummary(
  * そのものは持たない。
  */
 export interface DigestMetric {
-  /** 'article' | 'background' | 'trend' などの用途ラベル。 */
+  /** 'article' | 'background' | 'trend' | 'relevance'（軸ゲート判定） などの用途ラベル。 */
   label: string;
   model: string;
   /** 0 起点の試行番号。 */
@@ -331,6 +331,9 @@ async function collectStreamedContent(
  * run 間で大きくぶれるため、実運用ログから max_tokens の適値と暴走頻度を判断するのが
  * 目的。本文・生成テキストそのものは渡さない。onMetric の例外は握り潰す（観測が生成
  * 本体を壊さないため）。
+ *
+ * relevance.ts のゲート判定もこの stream+リトライ+メトリクス記録済みの経路を再利用する
+ * （label="relevance" で呼ぶ）ため export する。
  */
 async function recordMetric(
   onMetric: OnDigestMetric | undefined,
@@ -344,7 +347,7 @@ async function recordMetric(
   }
 }
 
-async function runTextGeneration(
+export async function runTextGeneration(
   ai: Ai,
   model: string,
   maxTokens: number,

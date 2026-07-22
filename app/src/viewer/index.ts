@@ -108,6 +108,31 @@ function bodyPredicate(filter: BodyFilter): string {
     : "AND s.article_id IS NULL";
 }
 
+/**
+ * 関心軸ゲートのフィルタモード。in は主フィード（掲載: 未判定含む fail-open）、
+ * excluded はゲートで非該当と判定された記事の観測用ビュー。
+ */
+type GateFilter = { mode: "in" } | { mode: "excluded" };
+
+/**
+ * `?gate` の生値をフィルタへ解釈する。`"excluded"` のみ非該当ビュー、それ以外
+ * （null 含む）は主フィード（掲載）を既定とする。
+ */
+function parseGateFilter(gate: string | null): GateFilter {
+  return gate === "excluded" ? { mode: "excluded" } : { mode: "in" };
+}
+
+/**
+ * ゲートの WHERE 追加述語。ENTRIES と COUNT の両方が共有する（offset 整合の要）。
+ * axis_relevant は NULL（未判定）を fail-open で in 側に含める。bind プレースホルダを
+ * 持たないリテラルなので bind 順序に影響しない。既定 in が全リクエストに常時付く。
+ */
+function gatePredicate(filter: GateFilter): string {
+  return filter.mode === "excluded"
+    ? "AND a.axis_relevant = 0"
+    : "AND (a.axis_relevant IS NULL OR a.axis_relevant = 1)";
+}
+
 interface EntryRow {
   feed_entry_id: number;
   rank: number;
@@ -261,6 +286,7 @@ function renderCategoryNav(
   categories: string[],
   filter: CategoryFilter,
   body: BodyFilter,
+  gate: GateFilter,
 ): string {
   const item = (label: string, href: string, active: boolean): string =>
     active
@@ -268,32 +294,44 @@ function renderCategoryNav(
       : `<a href="${href}">${escapeHtml(label)}</a>`;
 
   const parts = [
-    item("すべて", feedHref({ mode: "all" }, body), filter.mode === "all"),
+    item(
+      "すべて",
+      feedHref({ mode: "all" }, body, gate),
+      filter.mode === "all",
+    ),
   ];
   for (const c of categories) {
     parts.push(
       item(
         c,
-        feedHref({ mode: "named", category: c }, body),
+        feedHref({ mode: "named", category: c }, body, gate),
         filter.mode === "named" && filter.category === c,
       ),
     );
   }
   parts.push(
-    item("未分類", feedHref({ mode: "uncat" }, body), filter.mode === "uncat"),
+    item(
+      "未分類",
+      feedHref({ mode: "uncat" }, body, gate),
+      filter.mode === "uncat",
+    ),
   );
   return `<nav class="categories">${parts.join(" ")}</nav>`;
 }
 
 /**
- * 本文フィルタ切替ナビ。[本文要約][本文なし] を素のリンクで並べ、現在の category を保持し、
- * 選択中だけリンクにせず `<strong>` で現在地を示す（JS 不要）。renderCategoryNav と並べる。
+ * 本文フィルタ切替ナビ。[本文要約][本文なし] を素のリンクで並べ、現在の category・gate を
+ * 保持し、選択中だけリンクにせず `<strong>` で現在地を示す（JS 不要）。renderCategoryNav と並べる。
  */
-function renderBodyNav(filter: CategoryFilter, body: BodyFilter): string {
+function renderBodyNav(
+  filter: CategoryFilter,
+  body: BodyFilter,
+  gate: GateFilter,
+): string {
   const item = (label: string, mode: BodyFilter["mode"]): string =>
     body.mode === mode
       ? `<strong>${escapeHtml(label)}</strong>`
-      : `<a href="${feedHref(filter, { mode })}">${escapeHtml(label)}</a>`;
+      : `<a href="${feedHref(filter, { mode }, gate)}">${escapeHtml(label)}</a>`;
   return (
     `<nav class="bodies">` +
     item("本文要約", "with") +
@@ -304,13 +342,36 @@ function renderBodyNav(filter: CategoryFilter, body: BodyFilter): string {
 }
 
 /**
- * フィード href を組む単一ヘルパ。パラメータ順は category→body→page 固定で、既定値
- * （category=all・body=with・page 省略）は出さない。ナビとページネーションが共有し、
+ * ゲート切替ナビ。[掲載][軸非該当] を素のリンクで並べ、現在の category・body を保持し、
+ * 選択中だけリンクにせず `<strong>` で現在地を示す（JS 不要）。renderBodyNav と並べる。
+ */
+function renderGateNav(
+  filter: CategoryFilter,
+  body: BodyFilter,
+  gate: GateFilter,
+): string {
+  const item = (label: string, mode: GateFilter["mode"]): string =>
+    gate.mode === mode
+      ? `<strong>${escapeHtml(label)}</strong>`
+      : `<a href="${feedHref(filter, body, { mode })}">${escapeHtml(label)}</a>`;
+  return (
+    `<nav class="gates">` +
+    item("掲載", "in") +
+    " " +
+    item("軸非該当", "excluded") +
+    `</nav>`
+  );
+}
+
+/**
+ * フィード href を組む単一ヘルパ。パラメータ順は category→body→gate→page 固定で、既定値
+ * （category=all・body=with・gate=in・page 省略）は出さない。ナビとページネーションが共有し、
  * 現在のフィルタ状態をリンク間で保持する。href 値は encodeURIComponent でエスケープする。
  */
 function feedHref(
   filter: CategoryFilter,
   body: BodyFilter,
+  gate: GateFilter,
   page?: number,
 ): string {
   const params: string[] = [];
@@ -318,6 +379,7 @@ function feedHref(
     params.push(`category=${encodeURIComponent(filter.category)}`);
   else if (filter.mode === "uncat") params.push(`category=${UNCATEGORIZED}`);
   if (body.mode === "without") params.push("body=without");
+  if (gate.mode === "excluded") params.push("gate=excluded");
   if (page !== undefined) params.push(`page=${page}`);
   return params.length === 0 ? "/" : `/?${params.join("&")}`;
 }
@@ -345,12 +407,15 @@ function voteButton(
  * センチネルは「未分類」、それ以外はカテゴリ名で単一選択フィルタする。
  * `body` は `?body` の生値: `"without"` は本文なしフィード、それ以外（null 含む）は
  * 本文要約フィードを既定とする。
+ * `gate` は `?gate` の生値: `"excluded"` は関心軸ゲート非該当ビュー、それ以外（null 含む）は
+ * 主フィード（掲載: 未判定含む fail-open）を既定とする。excluded ビューでは傾向サマリを出さない。
  */
 export async function renderFeedPage(
   env: Env,
   pageNumber: number,
   category: string | null = null,
   body: string | null = null,
+  gate: string | null = null,
 ): Promise<Response> {
   const latest = await env.DB.prepare(MAX_DATE_SQL).first<{
     date: string | null;
@@ -376,11 +441,21 @@ export async function renderFeedPage(
 
   const filter = parseCategoryFilter(category);
   const bodyFilter = parseBodyFilter(body);
+  const gateFilter = parseGateFilter(gate);
 
   const trendRows =
-    (await buildTrendsStmt(env, date, filter).all<TrendRow>()).results ?? [];
+    gateFilter.mode === "excluded"
+      ? []
+      : ((await buildTrendsStmt(env, date, filter).all<TrendRow>()).results ??
+        []);
 
-  const countRow = await buildCountStmt(env, date, filter, bodyFilter).first<{
+  const countRow = await buildCountStmt(
+    env,
+    date,
+    filter,
+    bodyFilter,
+    gateFilter,
+  ).first<{
     total: number;
   }>();
   const total = countRow?.total ?? 0;
@@ -398,6 +473,7 @@ export async function renderFeedPage(
         date,
         filter,
         bodyFilter,
+        gateFilter,
         offset,
       ).all<EntryRow>()
     ).results ?? [];
@@ -407,12 +483,13 @@ export async function renderFeedPage(
   const pageBody =
     `<h1>フィード <span class="meta">${escapeHtml(toJstFeedDateLabel(date))}</span></h1>` +
     `<p><a href="/settings">設定</a></p>` +
-    renderCategoryNav(categories, filter, bodyFilter) +
-    renderBodyNav(filter, bodyFilter) +
+    renderCategoryNav(categories, filter, bodyFilter, gateFilter) +
+    renderBodyNav(filter, bodyFilter, gateFilter) +
+    renderGateNav(filter, bodyFilter, gateFilter) +
     renderTrends(trendRows, labels) +
     `<h2>記事</h2><ul class="entries">${list}</ul>` +
     renderPagination(current, totalPages, total, (p) =>
-      feedHref(filter, bodyFilter, p),
+      feedHref(filter, bodyFilter, gateFilter, p),
     ) +
     `<style>${FEEDBACK_STYLE}</style>` +
     `<script>${FEEDBACK_SCRIPT}</script>`;
@@ -423,12 +500,14 @@ export async function renderFeedPage(
 /**
  * entries クエリを組む。all/named/uncat を共有 FROM/JOIN + categoryPredicate の単一
  * ビルダに集約する。named のみ category を bind する（bind 順序: date,[category],limit,offset）。
+ * gate 述語はリテラルなので bind 順序に影響しない。
  */
 function buildEntriesStmt(
   env: Env,
   date: string,
   filter: CategoryFilter,
   body: BodyFilter,
+  gate: GateFilter,
   offset: number,
 ): D1PreparedStatement {
   const sql =
@@ -438,6 +517,8 @@ function buildEntriesStmt(
     bodyPredicate(body) +
     " " +
     categoryPredicate(filter) +
+    " " +
+    gatePredicate(gate) +
     ENTRIES_SQL_TAIL;
   return filter.mode === "named"
     ? env.DB.prepare(sql).bind(date, filter.category, PAGE_SIZE, offset)
@@ -450,6 +531,7 @@ function buildCountStmt(
   date: string,
   filter: CategoryFilter,
   body: BodyFilter,
+  gate: GateFilter,
 ): D1PreparedStatement {
   const sql =
     "SELECT COUNT(*) AS total " +
@@ -457,7 +539,9 @@ function buildCountStmt(
     " WHERE fe.date = ? " +
     bodyPredicate(body) +
     " " +
-    categoryPredicate(filter);
+    categoryPredicate(filter) +
+    " " +
+    gatePredicate(gate);
   return filter.mode === "named"
     ? env.DB.prepare(sql).bind(date, filter.category)
     : env.DB.prepare(sql).bind(date);

@@ -4,10 +4,12 @@ import {
   scoreAndBuildFeed,
   summarizeFeed,
   buildTrends,
+  gateAxisRelevance,
   type Fetchers,
   type IngestDeps,
 } from "./daily";
 import { sseStream } from "../../test/sse";
+import type { judgeAxisRelevance } from "../lib/relevance";
 import type {
   DigestConfig,
   EmbeddingConfig,
@@ -575,6 +577,12 @@ interface TrendRow {
   hit_axis: string | null;
   title: string;
 }
+interface GateRow {
+  article_id: number;
+  title: string;
+  summary_text: string;
+  axis_label: string;
+}
 
 function makeReadDb(reads: {
   workingSet?: WorkingRow[];
@@ -582,6 +590,7 @@ function makeReadDb(reads: {
   entries?: EntryRow[];
   trendRows?: TrendRow[];
   priorFeedArticleIds?: number[];
+  gateRows?: GateRow[];
 }) {
   const ops: Op[] = [];
   const db = {
@@ -597,6 +606,9 @@ function makeReadDb(reads: {
         async all<T>() {
           if (s.includes("hit_axis AS hit_axis")) {
             return { results: (reads.trendRows ?? []) as unknown as T[] };
+          }
+          if (s.includes("axis_label")) {
+            return { results: (reads.gateRows ?? []) as unknown as T[] };
           }
           if (s.includes("feed_entries fe JOIN")) {
             // `s.article_id IS NULL` を含むクエリ（要約段）は未要約エントリだけ返す。
@@ -628,6 +640,8 @@ function makeReadDb(reads: {
           else if (/^INSERT INTO summaries/i.test(s)) kind = "insert-summary";
           else if (/^DELETE FROM feed_trends/i.test(s)) kind = "delete-trends";
           else if (/^INSERT INTO feed_trends/i.test(s)) kind = "insert-trend";
+          else if (/^UPDATE articles SET axis_relevant/i.test(s))
+            kind = "update-axis-relevant";
           ops.push({ kind, args: this._args });
           return { success: true, meta: { changes: 1 } };
         },
@@ -931,6 +945,28 @@ describe("buildTrends", () => {
     { id: "web", label: "Web" },
   ];
 
+  it("excludes axis_relevant=0 (gated non-relevant) articles from the trend source query", async () => {
+    // The exclusion happens in the SQL WHERE clause (not JS-side filtering), so this
+    // asserts on the prepared statement text itself — the only place the behavior lives.
+    const preparedSql: string[] = [];
+    const { db } = makeReadDb({ trendRows: [] });
+    const realPrepare = db.prepare.bind(db);
+    (db as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      preparedSql.push(sql);
+      return realPrepare(sql);
+    };
+
+    await buildTrends(db, ai(vi.fn()), DIGEST, axesConfig, "2026-07-08", {
+      sleep: noSleep,
+    });
+
+    const trendSourceSql = preparedSql.find((sql) =>
+      sql.includes("hit_axis AS hit_axis"),
+    );
+    expect(trendSourceSql).toBeDefined();
+    expect(trendSourceSql).toMatch(/axis_relevant IS NULL OR .*axis_relevant != 0/);
+  });
+
   it("counts per axis and inserts trends (delete-first)", async () => {
     const trendRows: TrendRow[] = [
       { hit_axis: "ai", title: "a1" },
@@ -985,5 +1021,117 @@ describe("buildTrends", () => {
     expect(aiInsert?.args[2]).toBe(1);
     expect(aiInsert?.args[3]).toBeNull();
     expect(result).toEqual({ trendFailed: 1 });
+  });
+});
+
+describe("gateAxisRelevance", () => {
+  const rawSummary = (text: string) => JSON.stringify({ v: 1, raw: text });
+
+  it("marks a relevant article (axis_relevant = 1)", async () => {
+    const gateRows: GateRow[] = [
+      { article_id: 1, title: "t1", summary_text: rawSummary("s1"), axis_label: "AI" },
+    ];
+    const { db, ops } = makeReadDb({ gateRows });
+    const judge = vi.fn(async () => true);
+
+    const result = await gateAxisRelevance(db, ai(vi.fn()), DIGEST, "2026-07-08", {
+      judge,
+      sleep: noSleep,
+    });
+
+    const updates = ops.filter((o) => o.kind === "update-axis-relevant");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].args).toEqual([1, 1]);
+    expect(result).toEqual({ judged: 1, irrelevant: 0, judgeFailed: 0 });
+  });
+
+  it("marks an irrelevant article (axis_relevant = 0)", async () => {
+    const gateRows: GateRow[] = [
+      { article_id: 1, title: "t1", summary_text: rawSummary("s1"), axis_label: "AI" },
+    ];
+    const { db, ops } = makeReadDb({ gateRows });
+    const judge = vi.fn(async () => false);
+
+    const result = await gateAxisRelevance(db, ai(vi.fn()), DIGEST, "2026-07-08", {
+      judge,
+      sleep: noSleep,
+    });
+
+    const updates = ops.filter((o) => o.kind === "update-axis-relevant");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].args).toEqual([0, 1]);
+    expect(result).toEqual({ judged: 1, irrelevant: 1, judgeFailed: 0 });
+  });
+
+  it("passes the decoded summary plaintext (not the stored JSON) to judge", async () => {
+    const structured = JSON.stringify({
+      v: 1,
+      audience: "aud",
+      overview: "全体の要約テキスト",
+      thesis: "命題テキスト",
+      conclusion: "結論テキスト",
+    });
+    const gateRows: GateRow[] = [
+      { article_id: 1, title: "t1", summary_text: structured, axis_label: "AI" },
+    ];
+    const { db } = makeReadDb({ gateRows });
+    const judge = vi.fn<typeof judgeAxisRelevance>(async () => true);
+
+    await gateAxisRelevance(db, ai(vi.fn()), DIGEST, "2026-07-08", {
+      judge,
+      sleep: noSleep,
+    });
+
+    expect(judge).toHaveBeenCalledTimes(1);
+    const [, , axisLabel, title, summaryText] = judge.mock.calls[0];
+    expect(axisLabel).toBe("AI");
+    expect(title).toBe("t1");
+    expect(summaryText).not.toContain('"v":1');
+    expect(summaryText).toContain("全体の要約テキスト");
+    expect(summaryText).toContain("命題テキスト");
+    expect(summaryText).toContain("結論テキスト");
+  });
+
+  it("continues when one article's judge call fails, leaving axis_relevant NULL (fail-open)", async () => {
+    const gateRows: GateRow[] = [
+      { article_id: 1, title: "t1", summary_text: rawSummary("s1"), axis_label: "AI" },
+      { article_id: 2, title: "t2", summary_text: rawSummary("s2"), axis_label: "AI" },
+    ];
+    const { db, ops } = makeReadDb({ gateRows });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const judge = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("judge failed"))
+      .mockResolvedValueOnce(true);
+
+    const result = await gateAxisRelevance(db, ai(vi.fn()), DIGEST, "2026-07-08", {
+      judge,
+      sleep: noSleep,
+    });
+
+    const updates = ops.filter((o) => o.kind === "update-axis-relevant");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].args).toEqual([1, 2]);
+    expect(result).toEqual({ judged: 1, irrelevant: 0, judgeFailed: 1 });
+  });
+
+  it("only targets entries with hit_axis set, unjudged, and a summary (query-level; verified via gateRows contract)", async () => {
+    // The SQL itself filters (hit_axis IS NOT NULL AND axis_relevant IS NULL AND
+    // s.text IS NOT NULL); this test verifies gateAxisRelevance processes exactly what
+    // the query returns, without additional in-memory filtering that could diverge.
+    const gateRows: GateRow[] = [
+      { article_id: 5, title: "t5", summary_text: rawSummary("s5"), axis_label: "Web" },
+    ];
+    const { db, ops } = makeReadDb({ gateRows });
+    const judge = vi.fn(async () => true);
+
+    const result = await gateAxisRelevance(db, ai(vi.fn()), DIGEST, "2026-07-08", {
+      judge,
+      sleep: noSleep,
+    });
+
+    expect(judge).toHaveBeenCalledTimes(1);
+    expect(ops.filter((o) => o.kind === "update-axis-relevant")).toHaveLength(1);
+    expect(result.judged).toBe(1);
   });
 });
