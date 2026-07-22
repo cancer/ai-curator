@@ -128,7 +128,7 @@ button { font-size: 1rem; cursor: pointer; font-family: inherit; }
 .no-summary { margin: .7rem 0 0; font-size: .8rem; color: var(--muted); }
 
 /* === フィード: 記事要約（4 セクション。DESIGN.md の階層で強弱付け）=== */
-.summary { max-width: 72ch; margin-top: 1.25rem; display: flex; flex-direction: column; gap: .85rem; }
+.summary { margin-top: 1.5rem; display: flex; flex-direction: column; gap: .85rem; }
 .summary-section h4 { margin: 0 0 .2rem; font-size: .7rem; font-weight: 500;
   letter-spacing: .04em; color: var(--muted); }
 .summary-section p { margin: 0; font-size: 1rem; line-height: 1.7;
